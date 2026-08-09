@@ -1,0 +1,69 @@
+selectors:
+  # 主输入字段 - 按优先级排序，第一个匹配成功的会被使用
+  brand_input:
+    - 'kat-input[placeholder*="Sony"]'
+    - 'input[placeholder*="Sony"]'
+    - 'input[name*="brand" i]'
+    - 'input[placeholder*="Brand" i]'
+  
+  item_name_input:
+    - 'kat-textarea[placeholder*="Adidas"]'
+    - 'textarea[placeholder*="Adidas Blue Sneakers"]'
+    - 'textarea[name*="itemName" i]'
+    - 'textarea[placeholder*="Item" i]'
+  
+  no_product_id_checkbox:
+    - 'kat-checkbox[data-cy*="upc-exemption-checkbox"]'
+    - 'text=This product does not have a Product ID'
+    - 'input[type="checkbox"][name*="noProductId" i]'
+  
+  item_type_keyword_dropdown:
+    - 'select[name*="itemTypeKeyword" i]'
+    - '[data-testid*="itemTypeKeyword"]'
+    - '.item-type-dropdown'
+  
+  next_button:
+    - 'button:has-text("Next")'
+    - 'button[type="submit"]'
+  
+  # 页面状态标记
+  description_page_markers:
+    - "text=Description"
+    - "textarea[name='description']"
+    - 'url*=description'
+  
+  fail_markers:
+    - "text=Brand Authorization Required"
+    - "text=restricted to authorized sellers"
+    - "text=approval required"
+    - "text=You are not allowed"
+    - "text=Apply to sell"
+  
+  captcha_markers:
+    - "text=Enter the characters you see"
+    - "text=Two-Step Verification"
+    - "text=captcha"
+  
+  success_markers:
+    - "url*=description"
+    - "text=Item Name"
+    - "text=Product Type"
+
+# 页面适配配置
+page_adapter:
+  # 智能匹配 Item Type Keyword 的关键词列表
+  item_type_keywords:
+    - "screen protector"
+    - "screen protectors"
+    - "protector"
+  
+  # 重试配置
+  retry:
+    max_attempts: 5
+    delay_ms: 2000
+  
+  # 等待配置
+  wait:
+    page_load_ms: 30000
+    element_timeout_ms: 10000
+    animation_delay_ms: 800

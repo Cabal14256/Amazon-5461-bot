@@ -1,0 +1,18 @@
+# OpenClaw + Amazon 5461 Bot 环境变量配置
+
+# LLM 配置（用于 AI 分析）
+LLM_ENABLED=false
+LLM_PROVIDER=moonshot
+LLM_MODEL=moonshot-v1-8k
+LLM_API_KEY=sk-your-api-key-here
+LLM_BASE_URL=https://api.moonshot.cn/v1
+
+# AdsPower 配置
+ADSPOWER_API_BASE=http://local.adspower.net:50325
+
+# 可选：OpenAI 配置
+# OPENAI_API_KEY=sk-...
+# OPENAI_MODEL=gpt-4o-mini
+
+# 可选：Claude 配置（预留）
+# ANTHROPIC_API_KEY=sk-ant-...

@@ -1,0 +1,17 @@
+{
+  "_comment": "批量 5461 工作流配置文件示例",
+  "accounts": ["us_store_530", "us_store_529", "us_store_517"],
+  "brands": ["OUNNE", "WILLONE"],
+  "batch_size": 2,
+  "delay_between_items": 3,
+  "delay_between_batches": 10,
+  "require_human_confirm": true,
+  "case_followup": {
+    "enabled": true,
+    "delay_hours": 24.0,
+    "retry_interval_hours": 6.0,
+    "error_retry_interval_hours": 1.0,
+    "max_attempts": 12,
+    "auto_start_worker": true
+  }
+}

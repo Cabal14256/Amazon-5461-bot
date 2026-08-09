@@ -1,0 +1,7 @@
+marketplace: "IT"
+domain: "amazon.co.uk"
+mons_sel_mkid: "amzn1.mp.o.APJ6JRA9NG5V4"
+urls:
+  home: "https://sellercentral.amazon.co.uk/home?mons_sel_dir_mcid=amzn1.merchant.d.ACZ7PCS7ZFNLIG5FCI4V42CNVT3Q&mons_sel_mkid=amzn1.mp.o.APJ6JRA9NG5V4&mons_sel_dir_paid=amzn1.pa.d.ABZ3RRT3N67VQJCGDT4JRY5T2SRQ&ignore_selection_changed=true"
+  add_product_entry: "https://sellercentral.amazon.co.uk/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR&productData=%7B%22sparseText%22%3A%22screen+protector%22%7D&recommendedBrowseNodeId=473282031&displayPath=Elettronica%2FCellulari+e+accessori%2FAccessori%2FManutenzione%2C+cura+e+riparazione%2FProtezioni+per+lo+schermo#product_identity"
+  item_type_keyword: "Elettronica > Cellulari e accessori > Accessori > Manutenzione, cura e riparazione > Protezioni per lo schermo"

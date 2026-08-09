@@ -1,0 +1,190 @@
+{
+  "brand_input": {
+    "preferred": ["kat-input[data-cy='listing-approval-brand-name-input']"],
+    "fallback": [
+      "kat-input[data-cy='level-0:question-1:text']",
+      "kat-input[aria-label*='Brand']",
+      "input[name*='brand' i]",
+      "input[placeholder*='Brand' i]"
+    ],
+    "fallback_text": ["Brand name", "Brand", "品牌"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "旧 abis 流程: listing-approval-brand-name-input; 新 /sq/approvalrequest 流程: level-0:question-1:text"
+  },
+  "product_title_input": {
+    "preferred": ["kat-input[data-cy='level-0:question-2:text']"],
+    "fallback": [
+      "kat-input#question-cat_auth_mo_question_string_id_product_title",
+      "kat-input[aria-label*='Product title']",
+      "input[name*='product_title' i]",
+      "input[placeholder*='title' i]"
+    ],
+    "fallback_text": ["Product title", "Title", "商品标题"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "新 /sq/approvalrequest: level-0:question-2:text; 旧 abis: question-cat_auth_mo_question_string_id_product_title"
+  },
+  "manufacturer_input": {
+    "preferred": ["kat-input[data-cy='level-0:question-3:text']"],
+    "fallback": [
+      "kat-input#question-cat_auth_mo_question_string_id_manufacturer",
+      "kat-input[aria-label*='Manufacturer']",
+      "input[name*='manufacturer' i]"
+    ],
+    "fallback_text": ["Manufacturer", "制造商"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "制造商输入"
+  },
+  "product_description_input": {
+    "preferred": ["kat-input[data-cy='level-0:question-4:text']"],
+    "fallback": [
+      "kat-input#question-cat_auth_mo_question_string_id_product_description",
+      "kat-textarea[aria-label*='Description']",
+      "textarea[name*='description' i]"
+    ],
+    "fallback_text": ["Description", "Product description", "描述"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "产品描述输入"
+  },
+  "product_id_input": {
+    "preferred": ["kat-input[data-cy='level-0:question-0:text']"],
+    "fallback": [
+      "kat-input#question-cat_auth_mo_question_string_id_product_id",
+      "kat-input[aria-label*='Product ID']",
+      "input[name*='product_id' i]"
+    ],
+    "fallback_text": ["Product ID", "UPC", "EAN", "ASIN"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "Product ID (可选)"
+  },
+  "statement_textarea": {
+    "preferred": ["kat-textarea[data-cy='listing-approval-brand-statement-textarea']"],
+    "fallback": [
+      "kat-textarea[data-cy='level-1:question-0:textarea']",
+      "kat-textarea[aria-label*='Statement']",
+      "textarea[name*='statement' i]",
+      "textarea[placeholder*='statement' i]"
+    ],
+    "fallback_text": ["Statement", "Brand statement", "声明"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "品牌声明文本框"
+  },
+  "contact_email_input": {
+    "preferred": ["kat-input[data-cy='level-2:question-0:text']"],
+    "fallback": [
+      "kat-input#contact_info_email_input",
+      "kat-input[aria-label*='Email']",
+      "input[type='email']",
+      "input[name*='email' i]"
+    ],
+    "fallback_text": ["Email", "Contact email", "邮箱"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "联系邮箱"
+  },
+  "contact_phone_input": {
+    "preferred": ["kat-input[data-cy='level-2:question-1:text']"],
+    "fallback": [
+      "kat-input#contact_info_phone_input",
+      "kat-input[aria-label*='Phone']",
+      "input[type='tel']",
+      "input[name*='phone' i]"
+    ],
+    "fallback_text": ["Phone", "Contact phone", "电话"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "联系电话 (可选)"
+  },
+  "upload_input": {
+    "preferred": ["input[type='file']"],
+    "fallback": [
+      "input[type='file'][accept*='pdf']",
+      "input[type='file'][accept*='image']"
+    ],
+    "fallback_text": ["Upload", "Choose file", "Browse"],
+    "shadow_dom": false,
+    "risk": "medium",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "文件上传输入框"
+  },
+  "submit_button": {
+    "preferred": ["kat-button[data-cy='listing-approval-submit-button']"],
+    "fallback": [
+      "kat-button:has-text('Submit')",
+      "button:has-text('Submit')",
+      "kat-button:has-text('Apply')",
+      "button[type='submit']"
+    ],
+    "fallback_text": ["Submit", "Apply", "提交"],
+    "shadow_dom": true,
+    "risk": "high",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "5461 表单提交按钮，高风险操作"
+  },
+  "apply_to_sell_button": {
+    "preferred": ["kat-button[data-cy='seller-qualification-path-forward-button']"],
+    "fallback": [
+      "button:has-text('Apply to sell')",
+      "a:has-text('Apply')",
+      "button:has-text('Request approval')",
+      "kat-button:has-text('Apply')"
+    ],
+    "fallback_text": ["Apply to sell", "Request approval", "Apply"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "从 Add Product 页面进入 5461 的按钮"
+  },
+  "success_markers": {
+    "preferred": ["text='Submitted'", "text='Case ID'", "text='success'", "text='received'"],
+    "fallback": [
+      "text='Thank you'",
+      "text='submitted successfully'",
+      "text='Your application'"
+    ],
+    "fallback_text": ["Submitted", "Case ID", "success", "received", "Thank you"],
+    "shadow_dom": false,
+    "risk": "low",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "提交成功标记文本"
+  },
+  "captcha_markers": {
+    "preferred": ["text='Enter the characters you see'", "text='Two-Step Verification'"],
+    "fallback": [
+      "text='captcha'",
+      "text='verification code'",
+      "text='Security check'"
+    ],
+    "fallback_text": ["Enter the characters", "Two-Step", "captcha", "verification code"],
+    "shadow_dom": false,
+    "risk": "high",
+    "last_verified": "2026-05-19",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "验证码/2FA 标记，出现需人工介入"
+  }
+}

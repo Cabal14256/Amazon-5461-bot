@@ -1,0 +1,7 @@
+marketplace: "DE"
+domain: "amazon.co.uk"
+mons_sel_mkid: "amzn1.mp.o.A1PA6795UKMFR9"
+urls:
+  home: "https://sellercentral.amazon.co.uk/home?mons_sel_mkid=amzn1.mp.o.A1PA6795UKMFR9&mons_sel_dir_mcid=amzn1.merchant.d.ACZ7PCS7ZFNLIG5FCI4V42CNVT3Q&mons_sel_dir_paid=amzn1.pa.d.ABZ3RRT3N67VQJCGDT4JRY5T2SRQ&ignore_selection_changed=true"
+  add_product_entry: "https://sellercentral.amazon.co.uk/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR&productData=%7B%22sparseText%22%3A%22screen+protector%22%7D&recommendedBrowseNodeId=364934031&displayPath=Elektronik+%26+Foto%2FHandys+%26+Zubeh%C3%B6r%2FZubeh%C3%B6r%2FWartung%2C+Instandhaltung+%26+Reparaturen%2FDisplayschutzfolien#product_identity"
+  item_type_keyword: "Elektronik & Foto > Handys & Zubehör > Zubehör > Wartung, Instandhaltung & Reparaturen > Displayschutzfolien"

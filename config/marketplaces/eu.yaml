@@ -1,0 +1,17 @@
+# EU 市场配置已拆分到各国家文件
+# 请使用对应国家的配置文件：
+# - uk.yaml (英国)
+# - be.yaml (比利时)
+# - nl.yaml (荷兰)
+# - se.yaml (瑞典)
+#
+# 所有 EU 国家共享 sellercentral.amazon.co.uk 域名
+# 通过不同的 mons_sel_mkid 参数切换国家市场
+
+marketplace: "EU"
+domain: "amazon.co.uk"
+# 默认使用 UK 配置
+urls:
+  home: "https://sellercentral.amazon.co.uk/home?mons_sel_mkid=amzn1.mp.o.A1F83G8C2ARO7P&mons_sel_dir_mcid=amzn1.merchant.d.ACZ7PCS7ZFNLIG5FCI4V42CNVT3Q&mons_sel_dir_paid=amzn1.pa.d.ABZ3RRT3N67VQJCGDT4JRY5T2SRQ&ignore_selection_changed=true"
+  add_product_entry: "https://sellercentral.amazon.co.uk/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR&productData=%7B%22sparseText%22%3A%22screen+protector%22%7D&recommendedBrowseNodeId=329083031&displayPath=Electronics+%26+Photo%2FMobile+Phones+%26+Communication%2FAccessories%2FMaintenance%2C+Upkeep+%26+Repairs%2FScreen+Protectors#product_identity"
+  item_type_keyword: "Electronics & Photo > Mobile Phones & Communication > Accessories > Maintenance, Upkeep & Repairs > Screen Protectors"

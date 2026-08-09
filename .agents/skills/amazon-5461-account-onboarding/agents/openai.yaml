@@ -1,0 +1,4 @@
+interface:
+  display_name: "Amazon 5461 Account Onboarding"
+  short_description: "Onboard Amazon accounts and prepare brand statements"
+  default_prompt: "Use $amazon-5461-account-onboarding to onboard an Amazon account for a 5461 batch."

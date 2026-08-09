@@ -1,0 +1,12 @@
+selectors:
+  brand_input: "input[name='brandName']"                 # TODO: 真实选择器
+  statement_textarea: "textarea[name='reason']"          # TODO: 真实选择器
+  upload_input: "input[type='file']"                     # TODO: 真实选择器
+  submit_button: "button[type='submit']"                 # TODO: 真实选择器
+  success_markers:
+    - "text=Submitted"
+    - "text=Case ID"
+    - "text=Request sent"
+  captcha_markers:
+    - "text=Enter the characters you see"
+    - "text=Two-Step Verification"

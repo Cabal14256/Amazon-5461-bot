@@ -1,0 +1,5 @@
+marketplace: "US"
+urls:
+  flow_5461_entry: "https://sellercentral.amazon.com/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR&productData=%7B%22sparseText%22%3A%22screen+protector%22%7D&itemType=cell-phone-screen-protectors&displayPath=Cell+Phones+%26+Accessories%2FAccessories%2FMaintenance%2C+Upkeep+%26+Repairs%2FScreen+Protectors#product_identity"
+  flow_gtin_exemption_entry: "https://sellercentral.amazon.com/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR&productData=%7B%22sparseText%22%3A%22screen+protector%22%7D&itemType=cell-phone-screen-protectors&displayPath=Cell+Phones+%26+Accessories%2FAccessories%2FMaintenance%2C+Upkeep+%26+Repairs%2FScreen+Protectors#product_identity"
+  add_product_entry: "https://sellercentral.amazon.com/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR&productData=%7B%22sparseText%22%3A%22screen+protector%22%7D&itemType=cell-phone-screen-protectors&displayPath=Cell+Phones+%26+Accessories%2FAccessories%2FMaintenance%2C+Upkeep+%26+Repairs%2FScreen+Protectors#product_identity"

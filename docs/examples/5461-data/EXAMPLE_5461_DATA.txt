@@ -1,0 +1,84 @@
+# 5461 申请 - 示例品牌数据
+# 生成时间: 2026-04-09
+
+================================================================================
+示例品牌: XKJMQP (随机生成)
+================================================================================
+
+## 1. Product title (产品标题)
+XKJMQP Screen Protector for iPhone 15 Pro Max, 9H Hardness Tempered Glass, Anti-Scratch, Bubble Free, 6.7 inch
+
+## 2. Manufacturer (制造商)
+XKJMQP
+
+## 3. Product Description (产品描述)
+Dear Amazon Team,
+
+We are the brand owner of XKJMQP. We would like to apply for approval to list products under our brand on Amazon.
+
+Product Information:
+- Brand: XKJMQP
+- Product Type: Screen Protector
+- Material: Tempered Glass
+- Hardness: 9H
+- Compatible Device: iPhone 15 Pro Max
+
+We have attached all required documentation including product images showing our brand name clearly on the packaging and product itself.
+
+Please let us know if you need any additional information.
+
+Best regards,
+XKJMQP Team
+
+## 4. Product ID (UPC/EAN等)
+(空 - 使用GTIN豁免)
+
+## 5. Email (联系邮箱)
+从浏览器自动填充 (如图所示)
+
+## 6. Phone (联系电话)
+(不填)
+
+## 7. 产品图片文件夹
+C:\Users\Admin\.openclaw\workspace\projects\amazon-5461-bot\picture
+需要包含:
+- 包装正面图
+- 包装背面图
+- 产品正面图
+- 产品背面图
+
+================================================================================
+表单字段选择器
+================================================================================
+
+Product title:
+  'kat-input#question-cat_auth_mo_question_string_id_product_title'
+
+Manufacturer:
+  'kat-input#question-cat_auth_mo_question_string_id_manufacturer'
+
+Product Description:
+  'kat-input#question-cat_auth_mo_question_string_id_product_description'
+
+Product ID (可选):
+  'kat-input#question-cat_auth_mo_question_string_id_product_id'
+
+Email:
+  'kat-input#contact_info_email_input'
+
+Phone (可选):
+  'kat-input#contact_info_phone_input'
+
+文件上传:
+  'input#document_upload_new:group-0:container-0:panel:document_input'
+
+提交按钮:
+  'kat-button#submit_button'
+
+================================================================================
+待确认
+================================================================================
+- Case ID 显示位置和格式
+- 提交后的成功页面特征
+- 是否需要勾选所有复选框
+================================================================================

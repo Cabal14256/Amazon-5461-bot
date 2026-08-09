@@ -1,0 +1,8 @@
+marketplace: "MX"
+domain: "amazon.com"
+urls:
+  home: "https://sellercentral.amazon.com/home?mons_sel_mkid=amzn1.mp.o.A1AM78C64UM0Y8&ignore_selection_changed=true"
+  flow_5461_entry: "https://sellercentral.amazon.com/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR&productData=%7B%22sparseText%22%3A%22screen+protector%22%7D&recommendedBrowseNodeId=9687448011&displayPath=Electr%C3%B3nicos%2FCelulares+y+Accesorios%2FAccesorios%2FMantenimiento%2C+Cuidados+y+Reparaciones%2FProtectores+de+Pantalla#product_identity"
+  flow_gtin_exemption_entry: "https://sellercentral.amazon.com/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR&productData=%7B%22sparseText%22%3A%22screen+protector%22%7D&recommendedBrowseNodeId=9687448011&displayPath=Electr%C3%B3nicos%2FCelulares+y+Accesorios%2FAccesorios%2FMantenimiento%2C+Cuidados+y+Reparaciones%2FProtectores+de+Pantalla#product_identity"
+  add_product_entry: "https://sellercentral.amazon.com/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR&productData=%7B%22sparseText%22%3A%22screen+protector%22%7D&recommendedBrowseNodeId=9687448011&displayPath=Electr%C3%B3nicos%2FCelulares+y+Accesorios%2FAccesorios%2FMantenimiento%2C+Cuidados+y+Reparaciones%2FProtectores+de+Pantalla#product_identity"
+  item_type_keyword: "Electrónicos > Celulares y Accesorios > Accesorios > Mantenimiento, Cuidados y Reparaciones > Protectores de Pantalla"
