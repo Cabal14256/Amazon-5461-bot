@@ -1,0 +1,26 @@
+{
+  "accounts": [
+    {
+      "account_id": "us_store_000",
+      "adspower_profile_id": "replace_with_adspower_profile_id",
+      "marketplace": "US",
+      "status": "active",
+      "note": "example only - do not commit real credentials",
+      "username": "seller@example.com",
+      "domain": "amazon.com",
+      "entry_url": "https://sellercentral.amazon.com/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR&itemType=cell-phone-screen-protectors#product_identity",
+      "item_type_keyword": "cell-phone-screen-protectors"
+    },
+    {
+      "account_id": "uk_store_000",
+      "adspower_profile_id": "replace_with_adspower_profile_id",
+      "marketplace": "UK",
+      "status": "active",
+      "note": "example only - do not commit real credentials",
+      "username": "seller@example.com",
+      "domain": "amazon.co.uk",
+      "entry_url": "https://sellercentral.amazon.co.uk/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR&itemType=screen-protectors#product_identity",
+      "item_type_keyword": "screen-protectors"
+    }
+  ]
+}

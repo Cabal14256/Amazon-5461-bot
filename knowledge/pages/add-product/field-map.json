@@ -1,0 +1,62 @@
+{
+  "product_title": {
+    "page_fields": ["Item Name", "Product title", "商品名称"],
+    "brand_pack_key": "item_name",
+    "required": true,
+    "notes": "Add Product 页面的 Item Name / Product title"
+  },
+  "brand_name": {
+    "page_fields": ["Brand name", "Brand", "品牌"],
+    "brand_pack_key": "brand",
+    "required": true,
+    "notes": "品牌名称"
+  },
+  "manufacturer": {
+    "page_fields": ["Manufacturer", "制造商"],
+    "brand_pack_key": "manufacturer",
+    "required": true,
+    "notes": "制造商名称"
+  },
+  "description": {
+    "page_fields": ["Description", "Product description", "描述"],
+    "brand_pack_key": "description",
+    "required": true,
+    "notes": "产品描述"
+  },
+  "email": {
+    "page_fields": ["Email", "Contact email", "邮箱"],
+    "brand_pack_key": "contact_email",
+    "required": true,
+    "notes": "联系邮箱"
+  },
+  "phone": {
+    "page_fields": ["Phone", "Contact phone", "电话"],
+    "brand_pack_key": "contact_phone",
+    "required": false,
+    "notes": "联系电话（可选）"
+  },
+  "statement": {
+    "page_fields": ["Statement", "Brand statement", "声明"],
+    "brand_pack_key": "statement",
+    "required": true,
+    "notes": "品牌授权声明文本"
+  },
+  "product_id": {
+    "page_fields": ["Product ID", "UPC", "EAN", "ASIN"],
+    "brand_pack_key": "product_id",
+    "required": false,
+    "notes": "产品编码（可选，通常勾选 No Product ID）"
+  },
+  "item_type_keyword": {
+    "page_fields": ["Item Type Keyword", "Product Type"],
+    "brand_pack_key": "item_type_keyword",
+    "required": true,
+    "notes": "Item Type Keyword，用于 Browse Node 选择"
+  },
+  "browse_node": {
+    "page_fields": ["Browse node", "Category", "Product category"],
+    "brand_pack_key": "browse_node",
+    "required": true,
+    "notes": "Browse Node / 产品分类"
+  }
+}

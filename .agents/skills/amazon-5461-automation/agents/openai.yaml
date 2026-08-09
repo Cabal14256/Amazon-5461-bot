@@ -1,0 +1,4 @@
+interface:
+  display_name: "Amazon 5461 Automation"
+  short_description: "Run and diagnose Amazon 5461 automation safely"
+  default_prompt: "Use $amazon-5461-automation to diagnose or run an Amazon 5461 workflow safely."

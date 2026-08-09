@@ -1,0 +1,52 @@
+================================================================================
+5461 申请数据 - 品牌: HOMEMO
+================================================================================
+
+【基本信息】
+  区域: EU
+  账号: 正常号-US-530号
+  国家: UK
+  品牌: HOMEMO
+  SKU: 530-UK-HOMEMO-EYXD
+
+【1. Product title (产品标题)】
+  HOMEMO Screen Protector 6.6 Inch,Tempered Glass Film, 2+2Pack, HD-Clear
+
+【2. Manufacturer (制造商)】
+  HOMEMO
+
+【3. Product Description (产品描述)】
+  ----------------------------------------------------------------------------
+Brand：HOMEMO 
+Manufacturer：HOMEMO
+Item name：HOMEMO Screen Protector 6.6 Inch,Tempered Glass Film, 2+2Pack, HD-Clear
+Item Category：Mobile Phones & Communication›Accessories›Maintenance, Upkeep & Repairs›Screen Protectors
+Color：Transparent
+Item Specification：0.5kg，14cm×16cm×13cm
+Item desrciption：Screen Protector for EYXD 6.6 Inch,  2+2Pack, Tempered Glass Film
+SKU：530-UK-HOMEMO-EYXD
+Item model：EYXD
+Brand ID(Brand Codes) ：153266
+﻿
+The brand has been officially added and the brand's authorisation certificate has been uploaded.
+  ----------------------------------------------------------------------------
+
+【4. Product ID (UPC/EAN等)】
+  (空 - 使用GTIN豁免)
+
+【5. Email (联系邮箱)】
+  从浏览器自动填充
+
+【6. Phone (联系电话)】
+  (不填)
+
+【7. 产品图片】
+  文件夹: C:\Users\Admin\.openclaw\workspace\projects\amazon-5461-bot\picture\HOMEMO
+  状态: 存在 (7 个文件)
+    - 20240617-161647.jpg
+    - 20240617-161723.jpg
+    - 20240617-161727.jpg
+    - 20240617-161730.jpg
+    - 20240617-161735.jpg
+    - 20240617-161740.jpg
+    - Thumbs.db

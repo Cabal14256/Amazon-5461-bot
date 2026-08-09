@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets / private configs
+.env
+.env.*
+!.env.example
+config/accounts.json
+config/accounts.json.*
+config/settings.yaml
+runtime/private/
+**/*password*
+**/*secret*
+**/*token*
+**/*cookie*
+**/*credential*
+
+# Runtime outputs
+runtime/*
+!runtime/state/
+runtime/state/*
+!runtime/state/.gitkeep
+evidence/
+logs/
+artifacts/
+memory/*.db
+
+# Historical data / generated outputs
+data/
+data/*.db
+data/*.db-journal
+data/batch_state*.json
+data/workflow_output.txt
+data/exports/
+
+# Hermes migration archives and one-off legacy material
+migration/private/
+legacy/
+*.bak.*
+
+# Account-specific local generators/onboarding helpers
+scripts/gen_[0-9]*.py
+scripts/register_[0-9]*.py
+
+# Business-sensitive source files
+*.xlsx
+brand_packs/
+picture/
+
+# Temp and screenshots
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.html
+*.har
+*.trace.zip
+
+# Keep explicit docs/templates
+!requirements.txt
+!README.md
+!PROJECT.md
+!CHANGELOG.md
+!config/*.example.json
+!runtime/**/.gitkeep
+!.gitkeep

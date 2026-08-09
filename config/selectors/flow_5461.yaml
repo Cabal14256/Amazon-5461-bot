@@ -1,0 +1,65 @@
+selectors:
+  # 品牌输入框
+  brand_input: 'kat-input[data-cy="listing-approval-brand-name-input"]'
+  
+  # 声明文本框
+  statement_textarea: 'kat-textarea[data-cy="listing-approval-brand-statement-textarea"]'
+  
+  # 文件上传输入
+  upload_input: 'input[type="file"]'
+  
+  # 提交按钮
+  submit_button: 'kat-button[data-cy="listing-approval-submit-button"]'
+  
+  # Apply to sell 按钮（从 Add Product 页面进入）
+  apply_to_sell_button: 'kat-button[data-cy="seller-qualification-path-forward-button"]'
+  
+  # 成功标记
+  success_markers:
+    - 'text=Submitted'
+    - 'text=Case ID'
+    - 'text=success'
+    - 'text=received'
+  
+  # 验证码/2FA 标记
+  captcha_markers:
+    - 'text=Enter the characters you see'
+    - 'text=Two-Step Verification'
+    - 'text=captcha'
+    - 'text=verification code'
+
+# 页面识别
+page_identification:
+  url_patterns:
+    - '/seller-qualification'
+    - '/listing/approval'
+  
+  title_patterns:
+    - 'Listing approval'
+    - 'Brand Authorization'
+
+# 表单字段（5461 表单页面）
+form_fields:
+  product_id:
+    selector: 'kat-input#question-cat_auth_mo_question_string_id_product_id'
+    required: false
+  
+  product_title:
+    selector: 'kat-input#question-cat_auth_mo_question_string_id_product_title'
+    required: true
+  
+  manufacturer:
+    selector: 'kat-input#question-cat_auth_mo_question_string_id_manufacturer'
+    required: true
+  
+  product_description:
+    selector: 'kat-input#question-cat_auth_mo_question_string_id_product_description'
+    required: true
+  
+  contact_email:
+    selector: 'kat-input#contact_info_email_input'
+    required: true
+  
+  contact_phone:
+    selector: 'kat-input#contact_info_phone_input'
+    required: false

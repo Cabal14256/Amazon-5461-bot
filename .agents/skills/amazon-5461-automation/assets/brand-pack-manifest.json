@@ -1,0 +1,16 @@
+{
+  "brand_name": "BRAND_NAME",
+  "marketplace": "US",
+  "category": "Screen Protectors",
+  "documents": {
+    "5461_statement": "docs/5461_statement_us.txt",
+    "gtin_statement": "docs/gtin_exemption_statement_us.txt"
+  },
+  "images": {
+    "packaging_front": "images/packaging_front.jpg",
+    "product_main": "images/product_main.jpg"
+  },
+  "attachments": {
+    "invoice": "attachments/invoice.pdf"
+  }
+}

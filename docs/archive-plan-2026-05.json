@@ -1,0 +1,377 @@
+[
+  {
+    "path": "_scratch\\5461文案表_backup.xlsx",
+    "size": 440566,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\5461文案表.xlsx",
+    "size": 30300,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\技术部日常表格_店铺账号.xlsx",
+    "size": 81388,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\amazon_5461_bot_backup_20260409_103729.zip",
+    "size": 330099,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\amazon_5461_bot_full_backup_20260409_103821.zip",
+    "size": 738792,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\BACKUP_MANIFEST.txt",
+    "size": 2492,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\brand_dialog_html.txt",
+    "size": 634,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\brand_dialog_screenshot.png",
+    "size": 97118,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\checkbox_dump.json",
+    "size": 2009,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\diagnose_587_new_ui.py",
+    "size": 6507,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\diagnose_continue_587_jzg.py",
+    "size": 7246,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\diagnose_input_react_props.py",
+    "size": 2051,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\diagnose_itemtype_widget.py",
+    "size": 2662,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\diagnose_newui_internal_state.py",
+    "size": 3968,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\diagnose_no_submit_pid_idempotent_587_jzg.py",
+    "size": 7774,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\diagnose_no_submit_pid_idempotent_589_jzg.py",
+    "size": 8333,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\old_func.txt",
+    "size": 16667,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\page_check.html",
+    "size": 195729,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\summarize_580.py",
+    "size": 1046,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\try_itemtype_methods.py",
+    "size": 4576,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\try_pid_toggle_variants.py",
+    "size": 5292,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "_scratch\\try_react_onchange.py",
+    "size": 3674,
+    "target": "_archive/experiments/2026-05/_scratch"
+  },
+  {
+    "path": "data\\batch_state_579_US_arch_fix_smoke_20260523_dryrun.json",
+    "size": 1567,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_579_US_arch_validate_20260523_dryrun.json",
+    "size": 3608,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_579_US_arch_validate_20260523_r2.json",
+    "size": 19869,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_579_US_arch_validate_20260523_r3.json",
+    "size": 19071,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_579_US_arch_validate_20260523.json",
+    "size": 15392,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_579_US_HOMEMO_state_loop_fix_20260523.json",
+    "size": 15179,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_20260522_dryrun.json",
+    "size": 7129,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_20260522.json",
+    "size": 4086,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_20260523_failed4_1625.json",
+    "size": 28566,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_20260523_failed5_1505.json",
+    "size": 43331,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_20260523_failed6_1400.json",
+    "size": 53799,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_20260523_more9_1203.json",
+    "size": 67811,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_20260523_requested5_run2.json",
+    "size": 1971,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_20260523_requested5.json",
+    "size": 1971,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_20260523_restart_1057.json",
+    "size": 40029,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_HOMEMO_retry_20260522.json",
+    "size": 2913,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_WILLONE_20260522.json",
+    "size": 952,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_WILLONE_retry2_20260522.json",
+    "size": 952,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_580_US_WILLONE_retry3_20260522.json",
+    "size": 2279,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_582_US_20260523_1726.json",
+    "size": 23915,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_585_US_20260524_1104.json",
+    "size": 7677,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_585_US_20260524_failed6_afterfix_1458.json",
+    "size": 25661,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_585_US_20260524_failed6_afterfix2_1502.json",
+    "size": 25800,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_585_US_20260524_failed6_afterfix3_1505.json",
+    "size": 41790,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_585_US_20260524_failed6_afterfix4_1526.json",
+    "size": 37432,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_585_US_20260524_failed6_rerun_1400.json",
+    "size": 39749,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_585_US_20260524_real_1110.json",
+    "size": 84926,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_585_US_20260524_real_1112.json",
+    "size": 79299,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_585_US_20260524_real_1113.json",
+    "size": 81722,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_587_US_JZG_after_dom_fix_20260525.json",
+    "size": 6333,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_587_US_JZG_after_newui_fix_20260525.json",
+    "size": 5574,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_587_US_JZG_after_react_state_fix_20260525.json",
+    "size": 6156,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_587_US_JZG_after_submit_button_fix_20260525.json",
+    "size": 5060,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_587_US_JZG_after_ui_detect_fix_20260525.json",
+    "size": 6340,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_587_US_JZG_after_value_fix_20260525.json",
+    "size": 6332,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_587_US_JZG_gians_after_ui_split_20260525.json",
+    "size": 13014,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_587_US_JZG_gians_test_20260525.json",
+    "size": 9567,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_587_US_JZG_gians_test2_20260525.json",
+    "size": 9226,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_587_US_JZG_gians_test3_20260525.json",
+    "size": 1066,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_589_US_20260526_1200.json",
+    "size": 3785,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_589_US_20260526_1201.json",
+    "size": 115965,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_589_US_20260526_1421_rerun.json",
+    "size": 38878,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_589_US_20260526_1442_after_panel_fix_smoke.json",
+    "size": 768,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_589_US_20260526_1446_after_panel_fix_smoke2.json",
+    "size": 10983,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_589_US_20260526_1452_after_panel_fix_smoke3.json",
+    "size": 10823,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_589_US_20260526_1501_after_panel_fix_5brands.json",
+    "size": 48244,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_589_US_20260526_1558_panel_retry_test3.json",
+    "size": 35365,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "data\\batch_state_590_US_20260526_1730_human_interaction_JZG_JavoYion.json",
+    "size": 25975,
+    "target": "_archive/batch_states/2026-05"
+  },
+  {
+    "path": "check_case_dashboard_v2.py",
+    "size": 3277,
+    "target": "_archive/experiments/2026-05/dashboard_check"
+  },
+  {
+    "path": "check_case_dashboard_v3.py",
+    "size": 3445,
+    "target": "_archive/experiments/2026-05/dashboard_check"
+  },
+  {
+    "path": "check_case_dashboard.py",
+    "size": 4288,
+    "target": "_archive/experiments/2026-05/dashboard_check"
+  },
+  {
+    "path": "retry_578_draft.py",
+    "size": 5649,
+    "target": "_archive/experiments/2026-05/retry"
+  },
+  {
+    "path": "retry_578_now.py",
+    "size": 801,
+    "target": "_archive/experiments/2026-05/retry"
+  }
+]

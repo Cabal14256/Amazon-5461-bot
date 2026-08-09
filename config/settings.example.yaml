@@ -1,0 +1,72 @@
+adspower:
+  backend: "api"  # api | cli; keep api for production unless explicitly testing CLI backend
+  api_base_url: "http://local.adspower.net:50325"
+  api_key: ""  # 本地API通常不需要密钥；如使用 CLI start/runtime 且需要 key，可填这里或环境变量
+  cli_command: "npx adspower-browser"
+  start_profile_timeout_sec: 60
+
+browser:
+  headless: false
+  action_timeout_ms: 20000
+  page_timeout_ms: 45000
+
+run:
+  require_human_confirm_before_submit: true
+  pause_on_captcha_or_2fa: true
+  save_html_snapshot: false
+
+paths:
+  evidence_root: "./runtime/evidence"
+  logs_root: "./runtime/logs"
+  db_path: "./runtime/state/ledger.db"
+  exports_root: "./runtime/exports"
+
+verification:
+  approved_threshold: 70
+
+# 5461 提交取得 Case ID 后，持久化排队并在到期时自动读取 Case 详情。
+# delay_hours 是待确认的 n；后续只需修改这一项，无需改账号或品牌代码。
+case_followup:
+  enabled: true
+  delay_hours: 24.0
+  retry_interval_hours: 6.0
+  error_retry_interval_hours: 1.0
+  max_attempts: 12
+  poll_interval_seconds: 60
+  auto_start_worker: true
+  registration_path: "./data/5461申请登记表.xlsx"
+
+# Read-only binding is safe to enable after the app/table identifiers are set
+# in .env. Real Bitable writes stay disabled until dry-run output is reviewed.
+feishu_bitable:
+  enabled: false
+  bind_on_schedule: true
+  write_enabled: false
+  request_timeout_seconds: 20
+  max_candidate_records: 100
+  field_map:
+    account: "账号"
+    country: "国家"
+    country_eu: "国家EU"
+    brand: "品牌"
+    sku: "SKU"
+    progress: "5461进度"
+  country_option_site_map:
+    比利时: "BE"
+    瑞典: "SE"
+    荷兰: "NL"
+    德国: "DE"
+    英国: "UK"
+    法国: "FR"
+    西班牙: "ES"
+  account_suffix_by_site:
+    US: "US"
+    MX: "MX"
+    UK: "EU"
+    BE: "EU"
+    NL: "EU"
+    SE: "EU"
+    DE: "EU"
+    FR: "EU"
+    ES: "EU"
+    IT: "EU"

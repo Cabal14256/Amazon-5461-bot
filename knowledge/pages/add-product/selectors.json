@@ -1,0 +1,131 @@
+{
+  "brand_input": {
+    "preferred": ["kat-input[data-cy='listing-approval-brand-name-input']"],
+    "fallback": [
+      "kat-input[aria-label*='Brand']",
+      "input[name*='brand' i]",
+      "input[placeholder*='Brand' i]",
+      "kat-input[placeholder*='Brand' i]"
+    ],
+    "fallback_text": ["Brand name", "Brand", "品牌"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-18",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "Add Product 页面品牌输入框，kat-input 在 Shadow DOM 内"
+  },
+  "item_name_input": {
+    "preferred": ["kat-textarea[data-cy='item-name-input']"],
+    "fallback": [
+      "kat-textarea[aria-label*='Item Name']",
+      "textarea[name*='itemName' i]",
+      "textarea[placeholder*='Item' i]",
+      "kat-textarea[placeholder*='Adidas']"
+    ],
+    "fallback_text": ["Item Name", "Product title", "商品名称"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-18",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "Item Name / Product Title 输入框"
+  },
+  "no_product_id_checkbox": {
+    "preferred": ["kat-checkbox[data-cy*='upc-exemption-checkbox']"],
+    "fallback": [
+      "input[type='checkbox'][name*='noProductId' i]",
+      "kat-checkbox[aria-label*='No Product ID']",
+      "input[type='checkbox'][name*='no_product_id' i]"
+    ],
+    "fallback_text": ["No Product ID", "I don't have a product ID", "This product does not have a Product ID", "我没有商品编码"],
+    "shadow_dom": true,
+    "risk": "medium",
+    "last_verified": "2026-05-18",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "GTIN/UPC 豁免 checkbox"
+  },
+  "item_type_keyword_dropdown": {
+    "preferred": ["select[name*='itemTypeKeyword' i]"],
+    "fallback": [
+      "[data-testid*='itemTypeKeyword']",
+      ".item-type-dropdown",
+      "kat-dropdown[name*='itemTypeKeyword' i]"
+    ],
+    "fallback_text": ["Item Type Keyword", "Product Type"],
+    "shadow_dom": false,
+    "risk": "medium",
+    "last_verified": "2026-05-18",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "Item Type Keyword 下拉选择"
+  },
+  "browse_node_dropdown": {
+    "preferred": ["kat-dropdown[data-cy='browse-node-dropdown']"],
+    "fallback": [
+      "select[name*='browseNode' i]",
+      "kat-dropdown[aria-label*='Category']",
+      "[data-testid*='browse-node']"
+    ],
+    "fallback_text": ["Browse node", "Category", "Product category"],
+    "shadow_dom": true,
+    "risk": "medium",
+    "last_verified": "2026-05-18",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "Browse Node / Category 下拉选择"
+  },
+  "next_button": {
+    "preferred": ["kat-button[data-cy='next-button']"],
+    "fallback": [
+      "button:has-text('Next')",
+      "button[type='submit']",
+      "kat-button:has-text('Next')",
+      "input[type='submit']"
+    ],
+    "fallback_text": ["Next", "Continue"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-18",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "Next 按钮，disabled 时需在 shadowRoot 内层处理"
+  },
+  "apply_to_sell_button": {
+    "preferred": ["kat-button[data-cy='seller-qualification-path-forward-button']"],
+    "fallback": [
+      "button:has-text('Apply to sell')",
+      "a:has-text('Apply')",
+      "button:has-text('Request approval')",
+      "kat-button:has-text('Apply')",
+      "kat-button:has-text('Request')"
+    ],
+    "fallback_text": ["Apply to sell", "Request approval", "Apply"],
+    "shadow_dom": true,
+    "risk": "low",
+    "last_verified": "2026-05-18",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "5461 触发后的 Apply to sell 按钮"
+  },
+  "connect_brand_radio": {
+    "preferred": ["input[type='radio'][name='brand-record-selection-radio-button']"],
+    "fallback": [
+      "kat-radiobutton",
+      "input[type='radio'][name*='brand' i]"
+    ],
+    "fallback_text": [],
+    "shadow_dom": false,
+    "risk": "medium",
+    "last_verified": "2026-05-18",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "Connect brand 弹窗中的品牌单选"
+  },
+  "connect_brand_button": {
+    "preferred": ["kat-button[data-testid='connect-brand-button']"],
+    "fallback": [
+      "button:has-text('Connect this brand')",
+      "kat-button:has-text('Connect')"
+    ],
+    "fallback_text": ["Connect this brand", "Connect"],
+    "shadow_dom": true,
+    "risk": "medium",
+    "last_verified": "2026-05-18",
+    "verified_sites": ["US", "UK", "MX"],
+    "notes": "Connect brand 弹窗中的确认按钮"
+  }
+}

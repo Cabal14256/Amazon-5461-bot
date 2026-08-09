@@ -1,0 +1,9 @@
+{
+  "_comment": "批量 5461 工作流配置文件",
+  "accounts": ["us_store_530", "us_store_529", "us_store_517"],
+  "brands": ["OUNNE", "WILLONE", "HOMEMO"],
+  "batch_size": 2,
+  "delay_between_items": 3,
+  "delay_between_batches": 10,
+  "require_human_confirm": true
+}
