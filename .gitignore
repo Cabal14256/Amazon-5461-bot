@@ -38,9 +38,10 @@ runtime/private/
 **/*credential*
 
 # Runtime outputs
-runtime/**
-!runtime/**/
-!runtime/**/.gitkeep
+runtime/*
+!runtime/state/
+runtime/state/*
+!runtime/state/.gitkeep
 evidence/
 logs/
 artifacts/
