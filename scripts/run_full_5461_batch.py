@@ -20,6 +20,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_bufferin
 import argparse
 import json
 import random
+import re
 import time
 from pathlib import Path
 from datetime import datetime
@@ -28,11 +29,12 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from scripts._flow_cli_common import load_runtime
+from src.adspower_backend import create_adspower_client
 
 
 def _cdp_connect(playwright_instance, cdp_url: str, timeout: int = 30):
     """connect_over_cdp — direct call (sync_api must run on same thread as playwright start)."""
-    return playwright_instance.chromium.connect_over_cdp(cdp_url)
+    return playwright_instance.chromium.connect_over_cdp(cdp_url, timeout=max(1, int(timeout)) * 1000)
 from src.flow_submit_5461 import submit_5461_from_add_product
 from src.email_resolver import resolve_account_email, update_account_email
 from src.marketplace_switcher import MARKETPLACE_CONFIG, MarketplaceRegion
@@ -168,6 +170,48 @@ def resolve_statement_text(project_root: Path, brand_name: str, account_id: str,
     return "", ""
 
 
+def extract_statement_payload(statement_text: str) -> dict[str, str]:
+    """Extract the exact Bitable title/SKU while preserving the submitted body."""
+
+    text = str(statement_text or "").strip()
+    title_match = re.search(r"Item name[：:]\s*([^\r\n]+)", text, re.IGNORECASE)
+    sku_match = re.search(r"SKU[：:]\s*([^\r\n]+)", text, re.IGNORECASE)
+    return {
+        "title": title_match.group(1).strip() if title_match else "",
+        "sku": sku_match.group(1).strip() if sku_match else "",
+        "content": text,
+    }
+
+
+def resolve_account_specific_uk_payload(
+    project_root: Path,
+    brand_name: str,
+    account_id: str,
+    manifest: dict,
+    sync_result: dict,
+) -> dict[str, str]:
+    """Return UK material only when an account-specific statement is available."""
+
+    text, source = resolve_statement_text(
+        project_root,
+        brand_name,
+        account_id,
+        "UK",
+        "UK",
+        manifest,
+        sync_result,
+    )
+    account_num = normalize_account_num(account_id)
+    expected_suffix = f".account_{account_num}.txt"
+    if not source or not Path(source).name.endswith(expected_suffix):
+        return {"title": "", "sku": "", "content": ""}
+    payload = extract_statement_payload(text)
+    expected_prefix = f"{account_num}-UK-{brand_name}-".casefold()
+    if not payload["sku"].casefold().startswith(expected_prefix):
+        return {"title": "", "sku": "", "content": ""}
+    return payload
+
+
 def create_batch_state(
     accounts: list,
     brands: list,
@@ -254,6 +298,11 @@ def schedule_followup_for_result(item: dict, result: dict, config: dict, dry_run
         feishu_country_option=str(
             result.get("feishu_country_option") or item.get("feishu_country_option") or ""
         ),
+        submission_title=str(result.get("feishu_title") or ""),
+        submission_content=str(result.get("feishu_content") or ""),
+        uk_sku=str(result.get("feishu_uk_sku") or ""),
+        uk_title=str(result.get("feishu_uk_title") or ""),
+        uk_content=str(result.get("feishu_uk_content") or ""),
     )
 
 
@@ -412,6 +461,17 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
         
         upload_files = manifest.get("5461", {}).get("upload_files", [])
         statement_text, statement_source = resolve_statement_text(project_root, brand_name, account_id, site, marketplace, manifest, sync_result)
+        submission_payload = extract_statement_payload(statement_text)
+        if (normalize_site(site) or marketplace).upper() == "UK":
+            uk_payload = dict(submission_payload)
+        else:
+            uk_payload = resolve_account_specific_uk_payload(
+                project_root,
+                brand_name,
+                account_id,
+                manifest,
+                sync_result,
+            )
 
         upload_file_paths = []
         for f in upload_files:
@@ -498,6 +558,11 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                 "account_created": account_meta["created"],
                 "matched_profile": account_meta["matched_profile"],
                 "synced_sku": sync_result["sku"],
+                "feishu_title": submission_payload["title"],
+                "feishu_content": submission_payload["content"],
+                "feishu_uk_sku": uk_payload["sku"],
+                "feishu_uk_title": uk_payload["title"],
+                "feishu_uk_content": uk_payload["content"],
             }
             if monitor:
                 summary = monitor.stop()
@@ -534,6 +599,11 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                 "account_created": account_meta["created"],
                 "matched_profile": account_meta["matched_profile"],
                 "synced_sku": sync_result["sku"],
+                "feishu_title": submission_payload["title"],
+                "feishu_content": submission_payload["content"],
+                "feishu_uk_sku": uk_payload["sku"],
+                "feishu_uk_title": uk_payload["title"],
+                "feishu_uk_content": uk_payload["content"],
                 "console_logs": result.get("console_logs", ""),  # 429检测需要
                 "marketplace_switched": bool(result.get("marketplace_switched")),
                 "actual_marketplace": result.get("actual_marketplace"),
@@ -661,10 +731,6 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
             reuse_page = None  # 跨分组不复用页面
             if browser:
                 navigate_group_home(context, anchor_page, current_group, batch)
-                try:
-                    browser.close()
-                except Exception:
-                    pass
             if p:
                 try:
                     p.stop()
@@ -679,7 +745,7 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
             # 获取 AdsPower CDP URL（用该组第一个品牌）
             print(f"[DBG] calling load_runtime for {account_id} / {item['brand_name']}", flush=True)
             settings, acc, manifest, marketplace, mkt_cfg, cdp_url = load_runtime(account_id, item["brand_name"])
-            print(f"[DBG] load_runtime done, cdp_url={cdp_url}", flush=True)
+            print(f"[DBG] load_runtime done, cdp_endpoint_ready={bool(cdp_url)}", flush=True)
 
             import asyncio as _asyncio
             try:
@@ -689,8 +755,62 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
                 print(f"[DBG] asyncio loop check: {_le}", flush=True)
             print("[DBG] calling sync_playwright().start()", flush=True)
             p = sync_playwright().start()
-            print(f"[DBG] playwright started, calling connect_over_cdp({cdp_url})", flush=True)
-            browser = _cdp_connect(p, cdp_url)
+            connect_timeout_sec = max(
+                1,
+                int((settings.get("browser", {}) or {}).get("cdp_connect_timeout_ms") or 30_000) // 1000,
+            )
+            restart_attempts = max(
+                0,
+                int((settings.get("browser", {}) or {}).get("cdp_restart_attempts", 1)),
+            )
+            print("[DBG] playwright started, connecting to sanitized CDP endpoint", flush=True)
+            for connect_attempt in range(restart_attempts + 1):
+                try:
+                    browser = _cdp_connect(p, cdp_url, timeout=connect_timeout_sec)
+                    break
+                except Exception as connect_exc:
+                    try:
+                        p.stop()
+                    except Exception:
+                        pass
+                    if connect_attempt >= restart_attempts:
+                        raise RuntimeError(
+                            f"cdp_connect_failed_after_recovery ({type(connect_exc).__name__})"
+                        ) from connect_exc
+                    print(
+                        f"[会话] CDP 连接失败，自动重启 profile "
+                        f"({connect_attempt + 1}/{restart_attempts})",
+                        flush=True,
+                    )
+                    adsp = create_adspower_client(settings)
+                    if hasattr(adsp, "restart_profile"):
+                        restarted = adsp.restart_profile(
+                            profile_id=acc["adspower_profile_id"],
+                            health_timeout_sec=float(
+                                (settings.get("browser", {}) or {}).get("cdp_health_timeout_sec") or 5.0
+                            ),
+                            ready_timeout_sec=float(
+                                (settings.get("browser", {}) or {}).get("cdp_ready_timeout_sec") or 30.0
+                            ),
+                            restart_wait_sec=float(
+                                (settings.get("browser", {}) or {}).get("profile_restart_wait_sec") or 5.0
+                            ),
+                        )
+                    else:
+                        adsp.stop_profile(profile_id=acc["adspower_profile_id"])
+                        time.sleep(
+                            float((settings.get("browser", {}) or {}).get("profile_restart_wait_sec") or 5.0)
+                        )
+                        restarted = adsp.start_profile(
+                            profile_id=acc["adspower_profile_id"],
+                            launch_args=["--remote-allow-origins=*"],
+                        )
+                    cdp_url = str(restarted.get("ws_endpoint") or "")
+                    if not cdp_url:
+                        raise RuntimeError(
+                            "adspower_profile_restart_returned_no_cdp_endpoint"
+                        ) from connect_exc
+                    p = sync_playwright().start()
             context = browser.contexts[0] if browser.contexts else browser.new_context()
 
             # 保留一个 anchor 页面确保 context 存活。
@@ -816,6 +936,17 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
             # successfully submitted application because scheduling failed.
             result["case_followup_error"] = str(followup_error)
             print(f"[CaseFollowup] 排队失败，提交结果保持不变: {followup_error}")
+        finally:
+            # These values are needed only by the immediate Feishu ensure call.
+            # Avoid retaining a second copy of the statement in batch_state.json.
+            for private_key in (
+                "feishu_title",
+                "feishu_content",
+                "feishu_uk_sku",
+                "feishu_uk_title",
+                "feishu_uk_content",
+            ):
+                result.pop(private_key, None)
 
         if result.get("marketplace_switched") and (not result.get("actual_marketplace") or result.get("actual_marketplace") == item.get("site") or result.get("actual_marketplace") == normalize_site(item.get("site"))):
             group_market_switched = True
@@ -918,13 +1049,10 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
                 print(f"等待 {delay} 秒（品牌间随机冷却 {delay_min}-{delay_max}s，避免429限流）...")
                 time.sleep(delay)
 
-    # 全部处理结束：若最后一个账号/站点分组已完成，先把保留页跳到对应主页再关闭连接
+    # 全部处理结束：先把保留页跳到对应主页，再仅断开 Playwright。
+    # AdsPower profile 保持运行，避免 browser.close() 造成 profile 生命周期混乱。
     if browser:
         navigate_group_home(context, anchor_page, current_group, batch)
-        try:
-            browser.close()
-        except Exception:
-            pass
     if p:
         try:
             p.stop()

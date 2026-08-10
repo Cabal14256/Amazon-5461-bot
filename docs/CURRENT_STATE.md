@@ -70,3 +70,22 @@ country option. Repeat markers such as `比利时1` are preserved. Zero, multipl
 or same-site multi-round matches remain unbound instead of being guessed. The
 binding stores no Feishu credentials or cell contents, and real Bitable writes
 remain disabled by default.
+
+EU non-UK submissions prefer the unique existing row containing the UK country
+option as their shared Feishu progress target. The latest EU country result
+overwrites that row's single `5461进度` value. Multiple matching UK rows remain
+ambiguous and are never guessed.
+
+When enabled, Feishu scheduling now also idempotently plans or creates a missing
+actual-country detail row from the exact submitted SKU, title, and statement.
+That detail row does not receive a progress value. The UK shared row is created
+only when account-specific UK material exists and passes account/site/brand SKU
+validation; otherwise the result remains explicitly `missing_uk_materials`.
+Formula, lookup, Case reply, and time fields are never synthesized.
+
+AdsPower connections now validate the active profile, DevTools HTTP endpoint,
+and Playwright CDP handshake separately. A failed handshake uses a bounded
+30-second timeout and one full profile restart. Follow-up checks detach without
+closing the remote profile, and a same-account circuit breaker defers sibling
+tasks after recovery is exhausted. SOCKS proxy failures remain distinct from
+CDP failures and never change a business result.

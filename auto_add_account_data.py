@@ -483,6 +483,32 @@ def adapt_content_for_site(content: str, site: str, brand_name: str) -> str:
     return out
 
 
+def normalize_uk_statement_description(content: str, brand_name: str) -> str:
+    """Return UK statement text with the canonical non-empty description field."""
+    model_match = re.search(r"(?im)^Item model[：:]\s*([^\r\n]+)", content)
+    model = model_match.group(1).strip() if model_match else "XXX"
+    if brand_name.upper() == "VASG":
+        description = (
+            "smart-watch-screen-protectors for 44 mm,Smartwatch screen "
+            "protectors,2+2Pack, Tempered Glass Film"
+        )
+    else:
+        description = (
+            f"Screen Protector for {model}  6.10 Inch,  2+2Pack, "
+            "Tempered Glass Film"
+        )
+
+    replacement = f"Item desrciption：{description}"
+    description_line = r"(?im)^Item\s+des(?:cription|rciption)[：:][^\r\n]*"
+    if re.search(description_line, content):
+        return re.sub(description_line, replacement, content, count=1)
+
+    sku_line = r"(?im)^(SKU[：:])"
+    if re.search(sku_line, content):
+        return re.sub(sku_line, replacement + "\n" + r"\1", content, count=1)
+    return content.rstrip() + "\n" + replacement + "\n"
+
+
 def update_manifest_site_statement_files(brand_name: str, site: str) -> None:
     """Ensure manifest routes a site to its site-specific statement files.
 
@@ -640,6 +666,9 @@ def sync_brand_pack_for_account(brand_name: str, target_account: str, site: str 
             "requested_site": normalized_site,
             "note": "模板中未找到该品牌，已生成通用兜底文案。",
         }
+
+    if normalized_site == "UK":
+        adapted_content = normalize_uk_statement_description(adapted_content, brand_name)
 
     _pack_dir, docs_dir, _images_dir = ensure_dirs(selected_row["brand"])
 

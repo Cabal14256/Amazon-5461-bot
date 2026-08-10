@@ -78,6 +78,81 @@ def test_classifies_explicit_approval_and_action_required():
     assert action["is_success"] is None
 
 
+def test_classifies_accepted_application_reply_as_approved():
+    result = classify_case_reply(
+        "Answered",
+        [
+            _message(
+                "Amazon",
+                "We have completed our review and accepted your application. "
+                'You can now create new ASINs for "ExampleBrand", "SCREEN_PROTECTOR".',
+            )
+        ],
+    )
+    assert result["result"] == "approved"
+
+
+def test_classifies_german_accepted_application_reply_as_approved():
+    result = classify_case_reply(
+        "Answered",
+        [
+            _message(
+                "Amazon",
+                "Wir freuen uns, Ihnen mitteilen zu können, dass wir unsere Prüfung "
+                "abgeschlossen und Ihren Antrag akzeptiert haben. Sie können jetzt neue "
+                "ASINs für HOMEMO, SCREEN_PROTECTOR erstellen.",
+            )
+        ],
+    )
+
+    assert result["result"] == "approved"
+    assert result["is_success"] is True
+    assert result["is_success"] is True
+
+
+def test_classifies_brand_and_gtin_decline_reply():
+    result = classify_case_reply(
+        "Answered",
+        [
+            _message(
+                "Amazon",
+                "In view of the aforementioned, we had to decline your brand "
+                "and associated GTIN exemption request.",
+            )
+        ],
+    )
+    assert result["result"] == "declined"
+    assert result["is_success"] is False
+
+
+def test_classifies_french_explicit_rejection_reply():
+    result = classify_case_reply(
+        "Answered",
+        [
+            _message(
+                "Amazon",
+                "Au vu de ce qui précède, nous avons dû rejeter votre demande.",
+            )
+        ],
+    )
+    assert result["result"] == "declined"
+    assert result["is_success"] is False
+
+
+def test_classifies_german_had_to_decline_reply():
+    result = classify_case_reply(
+        "Answered",
+        [
+            _message(
+                "Amazon",
+                "Aufgrund des oben genannten Vorstehenden mussten wir Ihren Antrag ablehnen.",
+            )
+        ],
+    )
+    assert result["result"] == "declined"
+    assert result["is_success"] is False
+
+
 class _FakePage:
     def evaluate(self, _script, expected_case_id):
         return {
@@ -238,6 +313,55 @@ def test_targeted_claim_does_not_take_another_due_followup(tmp_path):
     assert untouched["status"] == "pending"
 
 
+def test_connection_circuit_defers_other_due_tasks_for_same_account(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    due = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    first_id, _ = enqueue_case_followup(
+        db_path, "us_store_671", "BE", "HOMEMO", "19999999991", due, due
+    )
+    second_id, _ = enqueue_case_followup(
+        db_path, "us_store_671", "BE", "JZG", "19999999990", due, due
+    )
+    third_id, _ = enqueue_case_followup(
+        db_path, "us_store_667", "BE", "WILLONE", "19999999989", due, due
+    )
+    monkeypatch.setattr(
+        case_followup,
+        "check_case_detail",
+        lambda *_args, **_kwargs: {
+            "result": "error",
+            "case_status": "",
+            "decision_reason": "cdp_connect_failed (TimeoutError)",
+            "technical_error_code": "cdp_connect_failed",
+            "evidence_dir": "",
+        },
+    )
+    settings = {
+        "paths": {"db_path": db_path},
+        "case_followup": {
+            "error_retry_interval_hours": 1,
+            "max_attempts": 3,
+            "connection_circuit_breaker": True,
+        },
+    }
+
+    results = case_followup.process_due_case_followups(
+        settings=settings,
+        limit=1,
+        update_records=False,
+        followup_ids=[first_id, second_id],
+    )
+    rows = {row["id"]: row for row in list_case_followups(db_path)}
+
+    assert results[0]["connection_circuit_deferred_count"] == 1
+    assert rows[first_id]["status"] == "retry"
+    assert rows[second_id]["status"] == "retry"
+    assert rows[second_id]["attempt_count"] == 0
+    assert rows[third_id]["status"] == "pending"
+    assert rows[second_id]["error"] == "connection_circuit_open: cdp_connect_failed"
+
+
 def test_pending_result_is_rescheduled_without_registration(monkeypatch, tmp_path):
     db_path = str(tmp_path / "ledger.db")
     init_db(db_path)
@@ -329,6 +453,17 @@ def test_schedule_persists_unique_feishu_record_binding(monkeypatch, tmp_path):
         },
         "feishu_bitable": {"enabled": True, "bind_on_schedule": True},
     }
+    ensured = []
+    monkeypatch.setattr(
+        feishu_bitable,
+        "ensure_submission_records",
+        lambda *_args, **kwargs: ensured.append(kwargs)
+        or {
+            "status": "dry_run",
+            "detail": {"status": "would_create"},
+            "shared": {"status": "existing"},
+        },
+    )
     monkeypatch.setattr(
         feishu_bitable,
         "bind_case_to_record",
@@ -354,6 +489,11 @@ def test_schedule_persists_unique_feishu_record_binding(monkeypatch, tmp_path):
         "19999999997",
         sku="SKU-1",
         feishu_country_option="比利时1",
+        submission_title="ExampleBrand Screen Protector",
+        submission_content="Brand：ExampleBrand\nSKU：SKU-1",
+        uk_sku="SKU-UK",
+        uk_title="ExampleBrand Screen Protector UK",
+        uk_content="Brand：ExampleBrand\nSKU：SKU-UK",
     )
 
     row = next(item for item in list_case_followups(db_path) if item["id"] == scheduled["id"])
@@ -361,6 +501,9 @@ def test_schedule_persists_unique_feishu_record_binding(monkeypatch, tmp_path):
     assert row["feishu_record_id"] == "rec_test"
     assert row["feishu_country_option"] == "比利时1"
     assert scheduled["feishu_progress_update"]["value"] == "申请中"
+    assert scheduled["feishu_record_ensure"]["detail"]["status"] == "would_create"
+    assert ensured[0]["title"] == "ExampleBrand Screen Protector"
+    assert ensured[0]["uk_sku"] == "SKU-UK"
 
 
 def test_marketplace_switch_evidence_passes_timeout_to_screenshot(tmp_path):

@@ -566,6 +566,39 @@ def reschedule_case_followup(
     conn.close()
 
 
+def defer_due_case_followups_for_account(
+    db_path: str,
+    account_id: str,
+    scheduled_at: str,
+    due_at: str,
+    reason: str,
+    *,
+    followup_ids: Optional[Iterable[int]] = None,
+    exclude_ids: Optional[Iterable[int]] = None,
+) -> int:
+    """Defer unclaimed due tasks after a profile-level connection failure."""
+    selected_ids = [int(value) for value in (followup_ids or [])]
+    excluded_ids = [int(value) for value in (exclude_ids or [])]
+    sql = """UPDATE case_followups
+             SET status='retry', scheduled_at=?, final_result='error',
+                 decision_reason=?, error=?, updated_at=?
+             WHERE account_id=? AND status IN ('pending', 'retry')
+               AND scheduled_at <= ?"""
+    params: list[Any] = [scheduled_at, reason, reason, now_str(), account_id, due_at]
+    if selected_ids:
+        sql += " AND id IN (" + ",".join("?" for _ in selected_ids) + ")"
+        params.extend(selected_ids)
+    if excluded_ids:
+        sql += " AND id NOT IN (" + ",".join("?" for _ in excluded_ids) + ")"
+        params.extend(excluded_ids)
+    conn = get_conn(db_path)
+    cur = conn.execute(sql, params)
+    count = cur.rowcount
+    conn.commit()
+    conn.close()
+    return count
+
+
 def get_next_case_followup_due(
     db_path: str,
     followup_ids: Optional[Iterable[int]] = None,

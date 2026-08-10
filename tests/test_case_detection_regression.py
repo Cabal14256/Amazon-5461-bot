@@ -1,12 +1,10 @@
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
+from src.case_dashboard_checker import (
+    _navigation_landed,
+    analyze_dashboard_dom_rows,
+    analyze_dashboard_text,
+    get_case_dashboard_url,
+)
 from src.flow_submit_5461 import extract_case_id
-from src.case_dashboard_checker import analyze_dashboard_text, _navigation_landed
 
 
 class FakePage:
@@ -74,3 +72,25 @@ Draft
     assert analyze_dashboard_text(text, "JavoYion")["status"] == "draft"
     assert analyze_dashboard_text(text, "WILLONE")["status"] == "under_review"
     assert analyze_dashboard_text(text, "uShield")["status"] == "draft"
+
+
+def test_germany_dashboard_uses_authenticated_shared_eu_portal():
+    assert get_case_dashboard_url("DE") == (
+        "https://sellercentral.amazon.co.uk/hz/myqdashboard/ref=xx_myqd_favb_xx"
+    )
+
+
+def test_dashboard_dom_rows_restore_case_id_hidden_in_kat_link_label():
+    result = analyze_dashboard_dom_rows(
+        [
+            {
+                "name": "WILLONE",
+                "text": "WILLONE Catalog Authorization 9 Aug 2026 Under review",
+                "case_ids": ["13153167372"],
+            }
+        ],
+        "WILLONE",
+    )
+
+    assert result["status"] == "under_review"
+    assert result["case_id"] == "13153167372"

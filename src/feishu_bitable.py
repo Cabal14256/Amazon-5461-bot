@@ -29,7 +29,10 @@ DEFAULT_FIELD_MAP = {
     "country_eu": "国家EU",
     "brand": "品牌",
     "sku": "SKU",
+    "title": "标题",
+    "content": "发信内容",
     "progress": "5461进度",
+    "remark": "备注",
 }
 
 DEFAULT_COUNTRY_OPTION_SITE_MAP = {
@@ -107,6 +110,7 @@ def _env_or_config(env_name: str, configured: Mapping[str, Any], config_name: st
 class FeishuBitableConfig:
     enabled: bool = False
     bind_on_schedule: bool = True
+    create_missing_records: bool = False
     write_enabled: bool = False
     app_id: str = ""
     app_secret: str = ""
@@ -115,6 +119,8 @@ class FeishuBitableConfig:
     table_id: str = ""
     request_timeout_seconds: float = 20.0
     max_candidate_records: int = 100
+    eu_progress_target_option: str = "英国"
+    account_value_template: str = "正常号-{suffix}-{digits}"
     field_map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
     country_option_site_map: dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_COUNTRY_OPTION_SITE_MAP)
@@ -158,10 +164,17 @@ def get_feishu_bitable_config(settings: Mapping[str, Any] | None = None) -> Feis
 
     enabled_value = _env_or_config("FEISHU_BITABLE_ENABLED", configured, "enabled", False)
     bind_value = _env_or_config("FEISHU_BIND_ON_SCHEDULE", configured, "bind_on_schedule", True)
+    create_value = _env_or_config(
+        "FEISHU_CREATE_MISSING_RECORDS",
+        configured,
+        "create_missing_records",
+        False,
+    )
     write_value = _env_or_config("FEISHU_BITABLE_WRITE_ENABLED", configured, "write_enabled", False)
     return FeishuBitableConfig(
         enabled=_as_bool(enabled_value),
         bind_on_schedule=_as_bool(bind_value, True),
+        create_missing_records=_as_bool(create_value),
         write_enabled=_as_bool(write_value),
         app_id=str(_env_or_config("FEISHU_APP_ID", configured, "app_id", "") or ""),
         app_secret=str(_env_or_config("FEISHU_APP_SECRET", configured, "app_secret", "") or ""),
@@ -172,6 +185,10 @@ def get_feishu_bitable_config(settings: Mapping[str, Any] | None = None) -> Feis
         table_id=str(_env_or_config("FEISHU_BITABLE_TABLE_ID", configured, "table_id", "") or ""),
         request_timeout_seconds=float(configured.get("request_timeout_seconds", 20.0)),
         max_candidate_records=max(1, int(configured.get("max_candidate_records", 100))),
+        eu_progress_target_option=str(configured.get("eu_progress_target_option") or "英国"),
+        account_value_template=str(
+            configured.get("account_value_template") or "正常号-{suffix}-{digits}"
+        ),
         field_map=field_map,
         country_option_site_map=country_map,
         account_suffix_by_site=account_suffix_map,
@@ -267,6 +284,30 @@ def _account_matches(
         _account_key(site_code + digits),
     }
     return actual in expected
+
+
+def _site_country_option(
+    site: str,
+    mapping: Mapping[str, str],
+) -> str:
+    """Resolve one unsuffixed 国家EU option for a marketplace."""
+
+    site_code = str(site or "").upper()
+    options = [
+        str(name)
+        for name, mapped_site in mapping.items()
+        if str(mapped_site).upper() == site_code and not split_country_option(str(name))[1]
+    ]
+    return options[0] if len(options) == 1 else ""
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        normalized = str(value or "").strip()
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return result
 
 
 @dataclass(frozen=True)
@@ -415,6 +456,218 @@ class FeishuBitableClient:
             raise FeishuConfigurationError("Configured Feishu fields were not found: " + ", ".join(missing))
         return by_name
 
+    def validate_creation_schema(self) -> dict[str, dict[str, Any]]:
+        """Validate only writable source fields; formula and lookup fields are omitted."""
+
+        by_name = self.validate_binding_schema()
+        required_types = {
+            "account": 1,
+            "country": 1,
+            "country_eu": 4,
+            "brand": 1,
+            "sku": 1,
+            "title": 1,
+            "content": 1,
+            "progress": 3,
+            "remark": 1,
+        }
+        missing = [
+            self.config.field_map[key]
+            for key in required_types
+            if self.config.field_map.get(key) not in by_name
+        ]
+        if missing:
+            raise FeishuConfigurationError(
+                "Configured Feishu creation fields were not found: " + ", ".join(missing)
+            )
+        wrong_types = [
+            self.config.field_map[key]
+            for key, expected_type in required_types.items()
+            if int(by_name[self.config.field_map[key]].get("type") or 0) != expected_type
+        ]
+        if wrong_types:
+            raise FeishuConfigurationError(
+                "Configured Feishu creation fields have unexpected types: "
+                + ", ".join(wrong_types)
+            )
+        return by_name
+
+    def _allowed_country_options(self) -> set[str]:
+        fields = self.validate_creation_schema()
+        country_meta = fields[self.config.field_map["country_eu"]]
+        return {
+            str(option.get("name") or "")
+            for option in ((country_meta.get("property") or {}).get("options") or [])
+            if str(option.get("name") or "")
+        }
+
+    def _validate_country_options(self, options: list[str]) -> None:
+        allowed = self._allowed_country_options()
+        unsupported = [option for option in options if allowed and option not in allowed]
+        if unsupported:
+            raise FeishuConfigurationError(
+                "Country option is not present in the existing Feishu field: "
+                + ", ".join(unsupported)
+            )
+
+    def _account_display_value(
+        self,
+        account_id: str,
+        site: str,
+        records: list[dict[str, Any]],
+    ) -> str:
+        account_field = self.config.field_map["account"]
+        existing = _unique_strings(
+            [
+                _scalar_text((record.get("fields") or {}).get(account_field))
+                for record in records
+                if _account_matches(
+                    _scalar_text((record.get("fields") or {}).get(account_field)),
+                    account_id,
+                    site,
+                    self.config.account_suffix_by_site,
+                )
+            ]
+        )
+        if len(existing) == 1:
+            return existing[0]
+        digits = _account_digits(account_id)
+        suffix = str(
+            self.config.account_suffix_by_site.get(str(site).upper())
+            or str(site).upper()
+        ).upper()
+        if not digits or not suffix:
+            return ""
+        try:
+            return self.config.account_value_template.format(
+                digits=digits,
+                suffix=suffix,
+                site=str(site).upper(),
+            )
+        except (KeyError, ValueError) as exc:
+            raise FeishuConfigurationError("Invalid Feishu account_value_template") from exc
+
+    def _actual_submission_records(
+        self,
+        records: list[dict[str, Any]],
+        account_id: str,
+        site: str,
+        brand_name: str,
+        sku: str,
+    ) -> list[dict[str, Any]]:
+        field_map = self.config.field_map
+        site_code = str(site).upper()
+        return [
+            record
+            for record in records
+            if _account_matches(
+                _scalar_text((record.get("fields") or {}).get(field_map["account"])),
+                account_id,
+                site_code,
+                self.config.account_suffix_by_site,
+            )
+            and _scalar_text(
+                (record.get("fields") or {}).get(field_map["brand"])
+            ).casefold()
+            == brand_name.strip().casefold()
+            and _scalar_text(
+                (record.get("fields") or {}).get(field_map["sku"])
+            ).casefold()
+            == sku.strip().casefold()
+            and _scalar_text(
+                (record.get("fields") or {}).get(field_map["country"])
+            ).upper()
+            == site_code
+        ]
+
+    def _uk_progress_records(
+        self,
+        records: list[dict[str, Any]],
+        account_id: str,
+        brand_name: str,
+    ) -> list[dict[str, Any]]:
+        field_map = self.config.field_map
+        target_option = self.config.eu_progress_target_option.strip()
+        target_site = country_option_to_site(
+            target_option,
+            self.config.country_option_site_map,
+        )
+        matches = []
+        for record in records:
+            fields = record.get("fields") or {}
+            if not _account_matches(
+                _scalar_text(fields.get(field_map["account"])),
+                account_id,
+                target_site or "UK",
+                self.config.account_suffix_by_site,
+            ):
+                continue
+            if (
+                _scalar_text(fields.get(field_map["brand"])).casefold()
+                != brand_name.strip().casefold()
+            ):
+                continue
+            country = _scalar_text(fields.get(field_map["country"])).strip().casefold()
+            options = _multi_strings(fields.get(field_map["country_eu"]))
+            if country in {"uk", "gb", "united kingdom", target_option.casefold()} or any(
+                country_option_to_site(option, self.config.country_option_site_map)
+                == target_site
+                for option in options
+            ):
+                matches.append(record)
+        return matches
+
+    def _create_record(
+        self,
+        fields: Mapping[str, Any],
+        *,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        if dry_run:
+            return {"status": "would_create", "record_id": ""}
+        if not self.config.write_enabled:
+            raise FeishuConfigurationError(
+                "Feishu writes are disabled; set write_enabled only after dry-run review"
+            )
+        body = self._request_json(
+            "POST",
+            self._table_path() + "/records",
+            stage="Feishu record creation",
+            json_body={"fields": dict(fields)},
+        )
+        record = (body.get("data") or {}).get("record") or {}
+        record_id = str(record.get("record_id") or "")
+        if not record_id:
+            raise FeishuApiError(
+                "Feishu record creation",
+                "missing_record_id",
+                "response contained no record_id",
+            )
+        return {"status": "created", "record_id": record_id}
+
+    def _update_record_fields(
+        self,
+        record_id: str,
+        fields: Mapping[str, Any],
+        *,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        if not fields:
+            return {"status": "unchanged", "record_id": str(record_id)}
+        if dry_run:
+            return {"status": "would_update", "record_id": str(record_id)}
+        if not self.config.write_enabled:
+            raise FeishuConfigurationError(
+                "Feishu writes are disabled; set write_enabled only after dry-run review"
+            )
+        self._request_json(
+            "PUT",
+            self._table_path() + "/records/" + quote(str(record_id), safe=""),
+            stage="Feishu record field update",
+            json_body={"fields": dict(fields)},
+        )
+        return {"status": "updated", "record_id": str(record_id)}
+
     def search_candidate_records(
         self,
         account_id: str,
@@ -455,6 +708,203 @@ class FeishuBitableClient:
                 break
         return records
 
+    def ensure_submission_records(
+        self,
+        account_id: str,
+        site: str,
+        brand_name: str,
+        sku: str,
+        title: str,
+        content: str,
+        country_option: str = "",
+        *,
+        uk_sku: str = "",
+        uk_title: str = "",
+        uk_content: str = "",
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Create missing detail/shared rows without inventing application data."""
+
+        if not self.config.create_missing_records:
+            return {
+                "status": "disabled",
+                "detail": {"status": "skipped"},
+                "shared": {"status": "skipped"},
+            }
+        self.validate_creation_schema()
+        site_code = str(site or "").strip().upper()
+        brand = str(brand_name or "").strip()
+        current_sku = str(sku or "").strip()
+        current_title = str(title or "").strip()
+        current_content = str(content or "").strip()
+        if not all((account_id.strip(), site_code, brand, current_sku)):
+            return {
+                "status": "insufficient_data",
+                "detail": {"status": "insufficient_data"},
+                "shared": {"status": "skipped"},
+            }
+
+        submitted_option = str(country_option or "").strip() or _site_country_option(
+            site_code,
+            self.config.country_option_site_map,
+        )
+        if submitted_option:
+            option_site = country_option_to_site(
+                submitted_option,
+                self.config.country_option_site_map,
+            )
+            if option_site and option_site != site_code:
+                return {
+                    "status": "insufficient_data",
+                    "detail": {"status": "country_option_mismatch"},
+                    "shared": {"status": "skipped"},
+                }
+
+        records = self.search_candidate_records(account_id, site_code, brand)
+        if len(records) > self.config.max_candidate_records:
+            return {
+                "status": "ambiguous",
+                "detail": {"status": "candidate_limit_exceeded"},
+                "shared": {"status": "skipped"},
+            }
+        account_value = self._account_display_value(
+            account_id,
+            site_code,
+            records,
+        )
+        if not account_value:
+            return {
+                "status": "insufficient_data",
+                "detail": {"status": "account_value_unresolved"},
+                "shared": {"status": "skipped"},
+            }
+
+        actual = self._actual_submission_records(
+            records,
+            account_id,
+            site_code,
+            brand,
+            current_sku,
+        )
+        if len(actual) > 1:
+            return {
+                "status": "ambiguous",
+                "detail": {"status": "multiple_existing_records"},
+                "shared": {"status": "skipped"},
+            }
+
+        field_map = self.config.field_map
+        target_option = self.config.eu_progress_target_option.strip()
+        target_site = country_option_to_site(
+            target_option,
+            self.config.country_option_site_map,
+        )
+        site_suffix = str(self.config.account_suffix_by_site.get(site_code) or site_code)
+        target_suffix = str(
+            self.config.account_suffix_by_site.get(target_site) or target_site
+        )
+        uses_uk_shared_progress = bool(
+            target_site == "UK"
+            and site_code != target_site
+            and site_suffix.upper() == target_suffix.upper()
+        )
+
+        shared = self._uk_progress_records(records, account_id, brand)
+        if uses_uk_shared_progress and len(shared) > 1:
+            return {
+                "status": "ambiguous",
+                "detail": {"status": "not_changed"},
+                "shared": {"status": "multiple_uk_records"},
+            }
+
+        detail_result: dict[str, Any]
+        if actual:
+            detail_result = {
+                "status": "existing",
+                "record_id": str(actual[0].get("record_id") or ""),
+            }
+        elif not current_title or not current_content:
+            detail_result = {"status": "missing_submission_materials", "record_id": ""}
+        else:
+            detail_fields: dict[str, Any] = {
+                field_map["account"]: account_value,
+                field_map["country"]: site_code,
+                field_map["brand"]: brand,
+                field_map["sku"]: current_sku,
+                field_map["title"]: current_title,
+                field_map["content"]: current_content,
+            }
+            if site_code == target_site and target_option:
+                self._validate_country_options([target_option])
+                detail_fields[field_map["country_eu"]] = [target_option]
+            detail_result = self._create_record(detail_fields, dry_run=dry_run)
+
+        if not uses_uk_shared_progress:
+            return {
+                "status": (
+                    "ready"
+                    if detail_result.get("status") in {"existing", "created"}
+                    else "dry_run"
+                    if detail_result.get("status") == "would_create"
+                    else "partial"
+                ),
+                "detail": detail_result,
+                "shared": dict(detail_result),
+            }
+
+        desired_options = _unique_strings([target_option, submitted_option])
+        if not submitted_option:
+            return {
+                "status": "partial",
+                "detail": detail_result,
+                "shared": {"status": "country_option_unresolved", "record_id": ""},
+            }
+        self._validate_country_options(desired_options)
+
+        if shared:
+            shared_record = shared[0]
+            shared_fields = shared_record.get("fields") or {}
+            existing_options = _multi_strings(shared_fields.get(field_map["country_eu"]))
+            merged_options = _unique_strings(existing_options + desired_options)
+            update_fields = (
+                {field_map["country_eu"]: merged_options}
+                if merged_options != existing_options
+                else {}
+            )
+            shared_result = self._update_record_fields(
+                str(shared_record.get("record_id") or ""),
+                update_fields,
+                dry_run=dry_run,
+            )
+            if shared_result["status"] == "unchanged":
+                shared_result["status"] = "existing"
+        elif not all((str(uk_sku).strip(), str(uk_title).strip(), str(uk_content).strip())):
+            shared_result = {"status": "missing_uk_materials", "record_id": ""}
+        else:
+            shared_fields = {
+                field_map["account"]: account_value,
+                field_map["country"]: target_site,
+                field_map["country_eu"]: desired_options,
+                field_map["brand"]: brand,
+                field_map["sku"]: str(uk_sku).strip(),
+                field_map["title"]: str(uk_title).strip(),
+                field_map["content"]: str(uk_content).strip(),
+            }
+            shared_result = self._create_record(shared_fields, dry_run=dry_run)
+
+        statuses = {detail_result.get("status"), shared_result.get("status")}
+        if statuses <= {"existing", "created", "updated"}:
+            overall_status = "ready"
+        elif statuses <= {"existing", "would_create", "would_update"}:
+            overall_status = "dry_run"
+        else:
+            overall_status = "partial"
+        return {
+            "status": overall_status,
+            "detail": detail_result,
+            "shared": shared_result,
+        }
+
     def find_record_binding(
         self,
         account_id: str,
@@ -480,14 +930,74 @@ class FeishuBitableClient:
                     "country option does not match the submitted marketplace",
                 )
 
-        records = self.search_candidate_records(account_id, site_code, brand_name, sku)
+        records: list[dict[str, Any]] = []
         used_country_fallback = False
+        used_eu_progress_target = False
+        candidate_count = 0
+
+        # Non-UK EU applications intentionally share the existing UK row's
+        # single progress cell. The newest country result overwrites that cell.
+        target_option = self.config.eu_progress_target_option.strip()
+        target_site = country_option_to_site(target_option, self.config.country_option_site_map)
+        if site_code != target_site and target_site == "UK" and site_code in {
+            "BE", "NL", "SE", "DE", "FR", "ES", "IT", "PL"
+        }:
+            account_brand_records = self.search_candidate_records(
+                account_id, site_code, brand_name
+            )
+            candidate_count = len(account_brand_records)
+            target_records: list[dict[str, Any]] = []
+            for record in account_brand_records:
+                fields = record.get("fields") or {}
+                if not _account_matches(
+                    _scalar_text(fields.get(self.config.field_map["account"])),
+                    account_id,
+                    site_code,
+                    self.config.account_suffix_by_site,
+                ):
+                    continue
+                if (
+                    _scalar_text(fields.get(self.config.field_map["brand"])).casefold()
+                    != brand_name.strip().casefold()
+                ):
+                    continue
+                country_value = _scalar_text(fields.get(self.config.field_map["country"]))
+                eu_options = _multi_strings(fields.get(self.config.field_map["country_eu"]))
+                has_target_option = any(
+                    country_option_to_site(option, self.config.country_option_site_map)
+                    == target_site
+                    for option in eu_options
+                )
+                has_target_country = country_value.strip().casefold() in {
+                    "uk",
+                    "gb",
+                    "united kingdom",
+                    target_option.casefold(),
+                }
+                if has_target_option or has_target_country:
+                    target_records.append(record)
+
+            if len(target_records) > 1:
+                return FeishuBindingResult(
+                    "ambiguous",
+                    "multiple UK Feishu records matched the shared EU progress target",
+                    candidate_count=candidate_count,
+                )
+            if len(target_records) == 1:
+                records = target_records
+                used_country_fallback = True
+                used_eu_progress_target = True
+
+        if not records:
+            records = self.search_candidate_records(account_id, site_code, brand_name, sku)
+            candidate_count = len(records)
         # Some existing EU rows intentionally reuse their UK SKU while 国家EU
         # contains the latest submitted country.  When the exact site SKU is not
         # present, an explicit country option may safely narrow account+brand rows.
         if not records and requested_option:
             records = self.search_candidate_records(account_id, site_code, brand_name)
             used_country_fallback = True
+            candidate_count = len(records)
         if len(records) > self.config.max_candidate_records:
             return FeishuBindingResult(
                 "ambiguous",
@@ -522,6 +1032,27 @@ class FeishuBitableClient:
                 continue
             country_value = _scalar_text(fields.get(field_map["country"]))
             eu_options = _multi_strings(fields.get(field_map["country_eu"]))
+
+            if used_eu_progress_target:
+                if requested_option:
+                    resolved_option = requested_option
+                else:
+                    submitted_options = [
+                        option
+                        for option in eu_options
+                        if country_option_to_site(
+                            option, self.config.country_option_site_map
+                        )
+                        == site_code
+                    ]
+                    if len(submitted_options) > 1:
+                        ambiguous_option = True
+                        continue
+                    resolved_option = (
+                        submitted_options[0] if submitted_options else target_option
+                    )
+                matches.append((record_id, resolved_option))
+                continue
 
             if requested_option:
                 if requested_option in eu_options:
@@ -561,13 +1092,15 @@ class FeishuBitableClient:
         return FeishuBindingResult(
             "bound",
             (
-                "unique existing Feishu record matched by account, brand and explicit country option"
+                "unique existing UK Feishu record selected as the shared EU progress target"
+                if used_eu_progress_target
+                else "unique existing Feishu record matched by account, brand and explicit country option"
                 if used_country_fallback
                 else "unique existing Feishu record matched"
             ),
             record_id=record_id,
             country_option=resolved_option,
-            candidate_count=len(records),
+            candidate_count=candidate_count or len(records),
         )
 
     def update_progress(self, record_id: str, progress: str, *, dry_run: bool = True) -> dict[str, Any]:
@@ -627,6 +1160,55 @@ def bind_case_to_record(
         return FeishuBindingResult("not_configured", _sanitize_message(str(exc))).to_dict()
     except FeishuApiError as exc:
         return FeishuBindingResult("error", _sanitize_message(str(exc))).to_dict()
+
+
+def ensure_submission_records(
+    settings: Mapping[str, Any],
+    account_id: str,
+    site: str,
+    brand_name: str,
+    sku: str,
+    title: str,
+    content: str,
+    country_option: str = "",
+    *,
+    uk_sku: str = "",
+    uk_title: str = "",
+    uk_content: str = "",
+    client: FeishuBitableClient | None = None,
+) -> dict[str, Any]:
+    """Idempotently create missing submission rows behind the Feishu write gate."""
+
+    config = get_feishu_bitable_config(settings)
+    if not config.enabled or not config.bind_on_schedule:
+        return {
+            "status": "disabled",
+            "detail": {"status": "skipped"},
+            "shared": {"status": "skipped"},
+        }
+    try:
+        config.validate()
+        active_client = client or FeishuBitableClient(config)
+        return active_client.ensure_submission_records(
+            account_id=account_id,
+            site=site,
+            brand_name=brand_name,
+            sku=sku,
+            title=title,
+            content=content,
+            country_option=country_option,
+            uk_sku=uk_sku,
+            uk_title=uk_title,
+            uk_content=uk_content,
+            dry_run=not config.write_enabled,
+        )
+    except (FeishuConfigurationError, FeishuApiError, ValueError) as exc:
+        return {
+            "status": "error",
+            "reason": _sanitize_message(str(exc)),
+            "detail": {"status": "not_changed"},
+            "shared": {"status": "not_changed"},
+        }
 
 
 def update_bound_progress(

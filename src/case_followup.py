@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from .approved_case_verification import verify_approved_case
-from .browser_manager import BrowserManager
+from .browser_manager import BrowserConnectionError, BrowserManager
 from .config_loader import load_yaml
 from .db import (
     claim_due_case_followups,
+    defer_due_case_followups_for_account,
     enqueue_case_followup,
     finish_case_followup,
     get_next_case_followup_due,
@@ -47,6 +48,13 @@ class CaseFollowupBlocked(RuntimeError):
     """Raised when login, CAPTCHA, 2FA, or another human control blocks the check."""
 
 
+CONNECTION_CIRCUIT_ERROR_CODES = {
+    "adspower_profile_unavailable",
+    "cdp_connect_failed",
+    "proxy_connection_failed",
+}
+
+
 def get_case_followup_config(settings: dict[str, Any] | None = None) -> dict[str, Any]:
     settings = settings or load_yaml(str(PROJECT_ROOT / "config" / "settings.yaml"))
     configured = dict(settings.get("case_followup") or {})
@@ -57,6 +65,7 @@ def get_case_followup_config(settings: dict[str, Any] | None = None) -> dict[str
         "error_retry_interval_hours": 1.0,
         "max_attempts": 12,
         "poll_interval_seconds": 60,
+        "connection_circuit_breaker": True,
         "auto_start_worker": True,
         "registration_path": "./data/5461申请登记表.xlsx",
         "approved_verification": {"enabled": True},
@@ -88,6 +97,19 @@ def _db_datetime(value: datetime) -> str:
 
 def _redact_emails(value: str) -> str:
     return re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[REDACTED_EMAIL]", value or "")
+
+
+def _technical_error(exc: Exception) -> tuple[str, str]:
+    """Return a stable error code and a sanitized diagnostic reason."""
+    if isinstance(exc, BrowserConnectionError):
+        return exc.error_code, str(exc)
+    message = str(exc)
+    if "ERR_SOCKS_CONNECTION_FAILED" in message:
+        return (
+            "proxy_connection_failed",
+            "Seller Central navigation failed through the AdsPower SOCKS proxy",
+        )
+    return "automation_error", f"{type(exc).__name__}: {message}"
 
 
 def case_detail_url(site: str, case_id: str) -> str:
@@ -202,10 +224,12 @@ APPROVED_PATTERNS = [
     r"\b(?:your|the) application (?:has been|was|is) approved\b",
     r"\b(?:your|the) request (?:has been|was|is) approved\b",
     r"\bwe (?:have )?approved your (?:application|request)\b",
+    r"\bwe (?:have )?completed our review and accepted your application\b",
     r"\byou (?:are|have been) approved to (?:create|sell|list)\b",
     r"\byou may now (?:create|sell|list)\b",
     r"\bapplication approuv[ée]e\b",
     r"\bantrag (?:wurde|ist) genehmigt\b",
+    r"\bwir (?:haben )?unsere pr[üu]fung abgeschlossen und (?:ihren|den) antrag akzeptiert(?: haben)?\b",
     r"\bsolicitud (?:ha sido|fue) aprobada\b",
     r"\brichiesta (?:è stata|e stata) approvata\b",
 ]
@@ -214,10 +238,13 @@ DECLINED_PATTERNS = [
     r"\b(?:your|the) application (?:has been|was|is) declined\b",
     r"\b(?:your|the) request (?:has been|was|is) (?:declined|rejected|denied)\b",
     r"\bwe (?:had to|have to|must) decline your (?:application|request)\b",
+    r"\bwe (?:had to|have to|must) decline your brand(?: and associated gtin exemption request)?\b",
     r"\bwe (?:are )?unable to approve your (?:application|request)\b",
     r"\bwe cannot approve your (?:application|request)\b",
     r"\bapplication (?:a été|a ete) refus[ée]e\b",
+    r"\bnous avons d[ûu] rejeter (?:votre|la) demande\b",
     r"\bantrag (?:wurde|ist) abgelehnt\b",
+    r"\bmussten wir (?:ihren|den) antrag ablehnen\b",
     r"\bsolicitud (?:ha sido|fue) rechazada\b",
     r"\bhemos tenido que rechazar (?:tu|su) solicitud\b",
     r"\brichiesta (?:è stata|e stata) rifiutata\b",
@@ -295,8 +322,15 @@ def check_case_detail(
     out_dir = evidence_root / "case_followups" / date_part / account_id / site_code / brand_name / str(case_id) / stamp
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    adspower_config = settings.get("adspower", {}) or {}
+    browser_config = settings.get("browser", {}) or {}
     manager = BrowserManager(
-        api_base_url=str(settings.get("adspower", {}).get("api_base_url") or "http://127.0.0.1:50325")
+        api_base_url=str(adspower_config.get("api_base_url") or "http://127.0.0.1:50325"),
+        cdp_connect_timeout_ms=int(browser_config.get("cdp_connect_timeout_ms") or 30_000),
+        cdp_health_timeout_sec=float(browser_config.get("cdp_health_timeout_sec") or 5.0),
+        cdp_ready_timeout_sec=float(browser_config.get("cdp_ready_timeout_sec") or 30.0),
+        cdp_restart_attempts=int(browser_config.get("cdp_restart_attempts", 1)),
+        profile_restart_wait_sec=float(browser_config.get("profile_restart_wait_sec") or 5.0),
     )
     page = None
     evidence_files: list[str] = []
@@ -418,6 +452,7 @@ def check_case_detail(
         (out_dir / "case_result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         return result
     except Exception as exc:
+        technical_error_code, technical_reason = _technical_error(exc)
         if page is not None:
             evidence_files.extend(_save_page_evidence(page, out_dir, "error"))
         result = {
@@ -429,7 +464,8 @@ def check_case_detail(
             "is_success": None,
             "case_status": "",
             "has_amazon_reply": False,
-            "decision_reason": f"{type(exc).__name__}: {exc}",
+            "decision_reason": technical_reason,
+            "technical_error_code": technical_error_code,
             "latest_amazon_reply": "",
             "evidence_dir": str(out_dir),
             "evidence_files": evidence_files,
@@ -504,6 +540,11 @@ def schedule_case_followup(
     submitted_at: str | None = None,
     delay_hours: float | None = None,
     feishu_country_option: str = "",
+    submission_title: str = "",
+    submission_content: str = "",
+    uk_sku: str = "",
+    uk_title: str = "",
+    uk_content: str = "",
 ) -> dict[str, Any]:
     config = get_case_followup_config(settings)
     submitted_dt = _parse_local_datetime(submitted_at)
@@ -532,7 +573,21 @@ def schedule_case_followup(
         submitted_db,
     )
     try:
-        from .feishu_bitable import bind_case_to_record
+        from .feishu_bitable import bind_case_to_record, ensure_submission_records
+
+        feishu_record_ensure = ensure_submission_records(
+            settings,
+            account_id=account_id,
+            site=site.upper(),
+            brand_name=brand_name,
+            sku=sku,
+            title=submission_title,
+            content=submission_content,
+            country_option=feishu_country_option,
+            uk_sku=uk_sku,
+            uk_title=uk_title,
+            uk_content=uk_content,
+        )
 
         feishu_binding = bind_case_to_record(
             settings,
@@ -543,6 +598,10 @@ def schedule_case_followup(
             country_option=feishu_country_option,
         )
     except Exception as exc:  # Downstream bookkeeping must not downgrade a submission.
+        feishu_record_ensure = {
+            "status": "error",
+            "reason": f"unexpected record ensure error: {exc.__class__.__name__}",
+        }
         feishu_binding = {
             "status": "error",
             "reason": f"unexpected binding error: {exc.__class__.__name__}",
@@ -583,6 +642,7 @@ def schedule_case_followup(
         "scheduled_at": scheduled_db,
         "delay_hours": delay,
         "case_id": str(case_id),
+        "feishu_record_ensure": feishu_record_ensure,
         "feishu_binding": feishu_binding,
         "feishu_progress_update": feishu_progress_update,
     }
@@ -742,7 +802,11 @@ def process_due_case_followups(
     init_db(db_path)
     claimed = claim_due_case_followups(db_path, limit=limit, followup_ids=followup_ids)
     results = []
-    for task in claimed:
+    deferred_claimed_ids: set[int] = set()
+    config = get_case_followup_config(settings)
+    for index, task in enumerate(claimed):
+        if int(task["id"]) in deferred_claimed_ids:
+            continue
         print(
             f"[CaseFollowup] 检查 {task['account_id']} / {task['marketplace']} / "
             f"{task['brand_name']} / Case {task['case_id']}"
@@ -753,6 +817,51 @@ def process_due_case_followups(
             f"[CaseFollowup] 结果 Case {task['case_id']}: "
             f"{result.get('result')} ({result.get('decision_reason', '')})"
         )
+        technical_error_code = str(result.get("technical_error_code") or "")
+        if not (
+            config.get("connection_circuit_breaker", True)
+            and technical_error_code in CONNECTION_CIRCUIT_ERROR_CODES
+        ):
+            continue
+
+        next_run = str(result.get("rescheduled_at") or "")
+        if not next_run:
+            retry_hours = max(0.1, float(config.get("error_retry_interval_hours") or 1.0))
+            next_run = _db_datetime(datetime.now() + timedelta(hours=retry_hours))
+        circuit_reason = f"connection_circuit_open: {technical_error_code}"
+        deferred_count = 0
+        for sibling in claimed[index + 1:]:
+            if sibling["account_id"] != task["account_id"]:
+                continue
+            reschedule_case_followup(
+                db_path,
+                int(sibling["id"]),
+                next_run,
+                "error",
+                str(sibling.get("case_status") or ""),
+                circuit_reason,
+                sibling.get("evidence_path"),
+                error=circuit_reason,
+            )
+            deferred_claimed_ids.add(int(sibling["id"]))
+            deferred_count += 1
+
+        due_at = _db_datetime(datetime.now())
+        deferred_count += defer_due_case_followups_for_account(
+            db_path,
+            str(task["account_id"]),
+            next_run,
+            due_at,
+            circuit_reason,
+            followup_ids=followup_ids,
+            exclude_ids=[int(item["id"]) for item in claimed],
+        )
+        result["connection_circuit_deferred_count"] = deferred_count
+        if deferred_count:
+            print(
+                f"[CaseFollowup] profile 连接熔断已开启，"
+                f"同账号 {deferred_count} 个任务延后到 {next_run}"
+            )
     return results
 
 

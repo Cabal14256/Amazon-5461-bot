@@ -38,6 +38,41 @@ def _client_with_records(records):
     return client
 
 
+def _creation_fields():
+    return [
+        {"field_name": "账号", "type": 1},
+        {"field_name": "国家", "type": 1},
+        {
+            "field_name": "国家EU",
+            "type": 4,
+            "property": {
+                "options": [
+                    {"name": "英国"},
+                    {"name": "比利时"},
+                    {"name": "德国"},
+                ]
+            },
+        },
+        {"field_name": "品牌", "type": 1},
+        {"field_name": "SKU", "type": 1},
+        {"field_name": "标题", "type": 1},
+        {"field_name": "发信内容", "type": 1},
+        {
+            "field_name": "5461进度",
+            "type": 3,
+            "property": {
+                "options": [
+                    {"name": "申请中"},
+                    {"name": "假过"},
+                    {"name": "拒绝"},
+                    {"name": "通过"},
+                ]
+            },
+        },
+        {"field_name": "备注", "type": 1},
+    ]
+
+
 def test_country_option_keeps_repeat_marker_but_resolves_marketplace():
     assert split_country_option("荷兰2") == ("荷兰", "2")
     assert country_option_to_site("荷兰2") == "NL"
@@ -121,7 +156,58 @@ def test_explicit_country_allows_unique_binding_when_existing_row_reuses_uk_sku(
 
     assert result.status == "bound"
     assert result.record_id == "rec_be"
-    assert "explicit country option" in result.reason
+    assert "shared EU progress target" in result.reason
+
+
+def test_non_uk_eu_application_prefers_unique_uk_progress_record():
+    client = FeishuBitableClient(_config())
+    uk_row = _record(
+        "rec_uk",
+        account="正常号-EU-671",
+        brand="JavoYion",
+        sku="671-UK-JavoYion-OLD",
+        country="UK",
+        eu=["英国", "比利时"],
+    )
+    de_row = _record(
+        "rec_de",
+        account="正常号-EU-671",
+        brand="JavoYion",
+        sku="671-DE-JavoYion-NEW",
+        country="DE",
+        eu=["德国"],
+    )
+    client.search_candidate_records = (
+        lambda _account, _site, _brand, sku="": [de_row] if sku else [uk_row, de_row]
+    )
+
+    result = client.find_record_binding(
+        "us_store_671",
+        "DE",
+        "JavoYion",
+        "671-DE-JavoYion-NEW",
+        country_option="德国",
+    )
+
+    assert result.status == "bound"
+    assert result.record_id == "rec_uk"
+    assert result.country_option == "德国"
+    assert "shared EU progress target" in result.reason
+
+
+def test_multiple_uk_progress_records_remain_ambiguous():
+    client = _client_with_records(
+        [
+            _record("rec_uk_1", country="UK", eu=["英国"]),
+            _record("rec_uk_2", country="UK", eu=["英国1"]),
+        ]
+    )
+
+    result = client.find_record_binding(
+        "667EU", "DE", "ExampleBrand", "SKU-DE", country_option="德国"
+    )
+
+    assert result.status == "ambiguous"
 
 
 def test_direct_marketplace_uses_country_when_country_eu_is_empty():
@@ -165,6 +251,113 @@ def test_progress_update_defaults_to_dry_run_without_network_write():
     result = client.update_progress("rec_1", "申请中")
 
     assert result == {"status": "dry_run", "record_id": "rec_1", "field": "5461进度", "value": "申请中"}
+
+
+def test_missing_detail_row_is_created_without_progress_and_shared_options_are_extended():
+    client = FeishuBitableClient(
+        _config(create_missing_records=True, write_enabled=True)
+    )
+    client._fields_cache = _creation_fields()
+    uk_row = _record(
+        "rec_uk",
+        account="正常号-EU-671",
+        brand="JavoYion",
+        sku="671-UK-JavoYion-A00A",
+        country="UK",
+        eu=["英国", "比利时"],
+    )
+    client.search_candidate_records = lambda *_args, **_kwargs: [uk_row]
+    created = []
+    updated = []
+    client._create_record = lambda fields, *, dry_run: (
+        created.append(dict(fields)) or {"status": "created", "record_id": "rec_de"}
+    )
+    client._update_record_fields = lambda record_id, fields, *, dry_run: (
+        updated.append((record_id, dict(fields)))
+        or {"status": "updated", "record_id": record_id}
+    )
+
+    result = client.ensure_submission_records(
+        "us_store_671",
+        "DE",
+        "JavoYion",
+        "671-DE-JavoYion-N11N",
+        "JavoYion Displayschutzfolie",
+        "Brand：JavoYion\nSKU：671-DE-JavoYion-N11N",
+        "德国",
+    )
+
+    assert result["status"] == "ready"
+    assert created[0]["国家"] == "DE"
+    assert "国家EU" not in created[0]
+    assert "5461进度" not in created[0]
+    assert "父记录" not in created[0]
+    assert updated == [("rec_uk", {"国家EU": ["英国", "比利时", "德国"]})]
+
+
+def test_missing_detail_and_shared_rows_are_created_from_exact_site_materials():
+    client = FeishuBitableClient(
+        _config(create_missing_records=True, write_enabled=True)
+    )
+    client._fields_cache = _creation_fields()
+    client.search_candidate_records = lambda *_args, **_kwargs: []
+    created = []
+
+    def create(fields, *, dry_run):
+        created.append(dict(fields))
+        return {"status": "created", "record_id": f"rec_{len(created)}"}
+
+    client._create_record = create
+
+    result = client.ensure_submission_records(
+        "us_store_671",
+        "DE",
+        "JavoYion",
+        "671-DE-JavoYion-N11N",
+        "JavoYion Displayschutzfolie",
+        "German application body",
+        "德国",
+        uk_sku="671-UK-JavoYion-A00A",
+        uk_title="JavoYion Screen Protector",
+        uk_content="UK application body",
+        dry_run=False,
+    )
+
+    assert result["status"] == "ready"
+    assert len(created) == 2
+    assert created[0]["账号"] == "正常号-EU-671"
+    assert created[0]["国家"] == "DE"
+    assert created[1]["国家"] == "UK"
+    assert created[1]["国家EU"] == ["英国", "德国"]
+    assert created[1]["SKU"] == "671-UK-JavoYion-A00A"
+    assert all("5461进度" not in fields for fields in created)
+
+
+def test_missing_uk_materials_never_fabricate_a_shared_row():
+    client = FeishuBitableClient(
+        _config(create_missing_records=True, write_enabled=True)
+    )
+    client._fields_cache = _creation_fields()
+    client.search_candidate_records = lambda *_args, **_kwargs: []
+    created = []
+    client._create_record = lambda fields, *, dry_run: (
+        created.append(dict(fields)) or {"status": "created", "record_id": "rec_de"}
+    )
+
+    result = client.ensure_submission_records(
+        "us_store_671",
+        "DE",
+        "JavoYion",
+        "671-DE-JavoYion-N11N",
+        "JavoYion Displayschutzfolie",
+        "German application body",
+        "德国",
+        dry_run=False,
+    )
+
+    assert result["status"] == "partial"
+    assert result["shared"]["status"] == "missing_uk_materials"
+    assert len(created) == 1
 
 
 def test_case_terminal_results_map_to_existing_progress_options():

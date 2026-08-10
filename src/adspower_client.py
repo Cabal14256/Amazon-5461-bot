@@ -1,7 +1,9 @@
-import os
-import time
 import json
-from typing import Any, Dict, Optional, List
+import os
+import socket
+import time
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -77,7 +79,7 @@ class AdsPowerClient:
             result = self._normalize_start_response(raw, "v2", profile_id)
             if result.get("ws_endpoint"):
                 return result
-            errors.append(f"v2 start returned success but no ws endpoint")
+            errors.append("v2 start returned success but no ws endpoint")
         except Exception as e:
             errors.append(f"v2 start failed: {e}")
         try:
@@ -85,7 +87,7 @@ class AdsPowerClient:
             result = self._normalize_start_response(raw, "v1", profile_id)
             if result.get("ws_endpoint"):
                 return result
-            errors.append(f"v1 start returned success but no ws endpoint")
+            errors.append("v1 start returned success but no ws endpoint")
         except Exception as e:
             errors.append(f"v1 start failed: {e}")
         raise AdsPowerAPIError(" ; ".join(errors))
@@ -138,36 +140,144 @@ class AdsPowerClient:
         raise AdsPowerAPIError(" ; ".join(errors))
 
     def ensure_profile_started(self, profile_id: str, serial_number: Optional[str] = None, **start_kwargs) -> Dict[str, Any]:
-        active = self.check_profile_active(profile_id=profile_id, serial_number=serial_number)
+        health_timeout_sec = float(start_kwargs.pop("health_timeout_sec", 5.0))
+        ready_timeout_sec = float(start_kwargs.pop("ready_timeout_sec", 30.0))
+        restart_if_unhealthy = bool(start_kwargs.pop("restart_if_unhealthy", True))
+        restart_wait_sec = float(start_kwargs.pop("restart_wait_sec", 5.0))
+        try:
+            active = self.check_profile_active(profile_id=profile_id, serial_number=serial_number)
+        except AdsPowerAPIError:
+            active = {"is_active": False}
         if active.get("is_active") and active.get("ws_endpoint"):
-            # 验证 ws 端口是否实际开放
-            ws_url = active.get("ws_endpoint")
-            try:
-                import socket
-                from urllib.parse import urlparse
-                parsed = urlparse(ws_url)
-                host = parsed.hostname or "127.0.0.1"
-                port = parsed.port or 80
-                sock = socket.create_connection((host, port), timeout=3)
-                sock.close()
+            health = self.check_cdp_health(str(active["ws_endpoint"]), timeout_sec=health_timeout_sec)
+            if health.get("ok"):
                 active["started_now"] = False
+                active["cdp_health"] = health
                 return active
-            except Exception:
-                print(f"[AdsPower] ws 端口未开放，重启浏览器: {ws_url}")
-                self.stop_profile(profile_id=profile_id, serial_number=serial_number)
-                time.sleep(2)
+            if not restart_if_unhealthy:
+                raise AdsPowerAPIError(
+                    "AdsPower profile is active but its CDP endpoint is unhealthy "
+                    f"({health.get('error_class') or 'unknown'})"
+                )
+            print("[AdsPower] CDP 健康检查失败，自动重启浏览器")
+            return self.restart_profile(
+                profile_id=profile_id,
+                serial_number=serial_number,
+                health_timeout_sec=health_timeout_sec,
+                ready_timeout_sec=ready_timeout_sec,
+                restart_wait_sec=restart_wait_sec,
+                **start_kwargs,
+            )
+
         # 添加 --remote-allow-origins=* 以允许 Playwright 连接 CDP
-        launch_args = start_kwargs.pop("launch_args", [])
+        launch_args = list(start_kwargs.pop("launch_args", []) or [])
         if "--remote-allow-origins=*" not in launch_args:
-            launch_args = list(launch_args) + ["--remote-allow-origins=*"]
+            launch_args.append("--remote-allow-origins=*")
         started = self.start_profile(
             profile_id=profile_id,
             serial_number=serial_number,
             launch_args=launch_args,
-            **start_kwargs
+            **start_kwargs,
         )
+        health = self.wait_for_cdp_ready(
+            str(started.get("ws_endpoint") or ""),
+            timeout_sec=ready_timeout_sec,
+            health_timeout_sec=health_timeout_sec,
+        )
+        if not health.get("ok"):
+            raise AdsPowerAPIError(
+                "AdsPower profile started but CDP did not become ready "
+                f"({health.get('error_class') or 'unknown'})"
+            )
         started["started_now"] = True
+        started["cdp_health"] = health
         return started
+
+    def restart_profile(
+        self,
+        profile_id: str,
+        serial_number: Optional[str] = None,
+        *,
+        health_timeout_sec: float = 5.0,
+        ready_timeout_sec: float = 30.0,
+        restart_wait_sec: float = 5.0,
+        **start_kwargs,
+    ) -> Dict[str, Any]:
+        """Fully restart one profile and wait for a usable DevTools endpoint."""
+        self.stop_profile(profile_id=profile_id, serial_number=serial_number)
+        time.sleep(max(0.0, restart_wait_sec))
+        launch_args = list(start_kwargs.pop("launch_args", []) or [])
+        if "--remote-allow-origins=*" not in launch_args:
+            launch_args.append("--remote-allow-origins=*")
+        started = self.start_profile(
+            profile_id=profile_id,
+            serial_number=serial_number,
+            launch_args=launch_args,
+            **start_kwargs,
+        )
+        health = self.wait_for_cdp_ready(
+            str(started.get("ws_endpoint") or ""),
+            timeout_sec=ready_timeout_sec,
+            health_timeout_sec=health_timeout_sec,
+        )
+        if not health.get("ok"):
+            raise AdsPowerAPIError(
+                "AdsPower profile restarted but CDP did not become ready "
+                f"({health.get('error_class') or 'unknown'})"
+            )
+        started["started_now"] = True
+        started["restarted"] = True
+        started["cdp_health"] = health
+        return started
+
+    def check_cdp_health(self, ws_url: str, timeout_sec: float = 5.0) -> Dict[str, Any]:
+        """Check TCP and ``/json/version`` without exposing the CDP endpoint."""
+        try:
+            parsed = urlparse(str(ws_url or ""))
+            if not parsed.hostname:
+                raise ValueError("missing CDP hostname")
+            secure = parsed.scheme in {"wss", "https"}
+            port = parsed.port or (443 if secure else 80)
+            timeout = max(0.1, float(timeout_sec))
+            with socket.create_connection((parsed.hostname, port), timeout=timeout):
+                pass
+            scheme = "https" if secure else "http"
+            response = requests.get(
+                f"{scheme}://{parsed.hostname}:{port}/json/version",
+                timeout=timeout,
+                verify=self.verify_ssl,
+            )
+            if response.status_code != 200:
+                raise AdsPowerAPIError(f"DevTools HTTP status {response.status_code}")
+            payload = response.json()
+            if not isinstance(payload, dict) or not (
+                payload.get("webSocketDebuggerUrl") or payload.get("Browser")
+            ):
+                raise AdsPowerAPIError("DevTools version response was incomplete")
+            return {"ok": True, "tcp_open": True, "devtools_http_ok": True}
+        except Exception as exc:
+            return {
+                "ok": False,
+                "tcp_open": False,
+                "devtools_http_ok": False,
+                "error_class": exc.__class__.__name__,
+            }
+
+    def wait_for_cdp_ready(
+        self,
+        ws_url: str,
+        *,
+        timeout_sec: float = 30.0,
+        health_timeout_sec: float = 5.0,
+        poll_interval_sec: float = 1.0,
+    ) -> Dict[str, Any]:
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        last = {"ok": False, "error_class": "cdp_not_ready"}
+        while True:
+            last = self.check_cdp_health(ws_url, timeout_sec=health_timeout_sec)
+            if last.get("ok") or time.monotonic() >= deadline:
+                return last
+            time.sleep(max(0.05, min(float(poll_interval_sec), deadline - time.monotonic())))
 
     def _build_base_url_candidates(self, api_base_url: Optional[str]) -> List[str]:
         candidates = []
@@ -202,8 +312,10 @@ class AdsPowerClient:
                                         headers=self._headers(), timeout=self.timeout, verify=self.verify_ssl)
                 try:
                     payload = resp.json()
-                except Exception:
-                    raise AdsPowerAPIError(f"Non-JSON response from {url}: {(resp.text or '')[:300]}")
+                except Exception as exc:
+                    raise AdsPowerAPIError(
+                        f"Non-JSON response from AdsPower API (HTTP {resp.status_code})"
+                    ) from exc
                 if resp.status_code >= 400:
                     raise AdsPowerAPIError(f"HTTP {resp.status_code}: {json.dumps(payload, ensure_ascii=False)}")
                 if not self._is_success_payload(payload):

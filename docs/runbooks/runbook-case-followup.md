@@ -21,13 +21,29 @@ it with `--case-followup-delay-hours`.
 ## Feishu record binding
 
 When `feishu_bitable.enabled` and `bind_on_schedule` are true, scheduling a
-Case also performs a read-only lookup in the existing Bitable. The lookup uses
-the configured fields `账号 + 品牌 + SKU`, then validates the submitted site
-against `国家` or `国家EU` locally. It stores only the matched `record_id`, the
-original country option, binding status, and a short reason in SQLite.
+Case first checks the existing Bitable and then binds the Case to its progress
+record. The lookup uses `账号 + 品牌 + SKU` and validates the site against
+`国家` or `国家EU` locally. It stores only the matched `record_id`, original
+country option, binding status, and a short reason in SQLite.
 
-It does not create a Feishu row and does not write Case IDs, replies, or times.
-Real Bitable updates remain blocked while `write_enabled: false`.
+With `create_missing_records: true`, a missing submission-detail row is planned
+from the exact account/site/brand SKU, title, and statement used by the run.
+The detail row's `5461进度` remains empty because the UK row is the single EU
+progress target. A missing UK target is created only from an account-specific
+UK statement whose SKU matches the account, UK site, and brand. Missing UK
+materials remain `missing_uk_materials`; the worker never fabricates them.
+
+The existing table's `父记录` cells are empty, so new rows leave that field
+empty as well. Formula and lookup fields are never written. Case IDs, replies,
+and times are also not written because those fields are absent from the table.
+All creates and field updates remain dry-run while `write_enabled: false`.
+
+For EU sites other than the UK, binding first looks for the unique existing
+account-and-brand row that represents the UK country option. That row is the
+shared progress target, so the latest EU country's result overwrites its single
+`5461进度` value. Scheduling also preserves the UK option and adds the exact
+submitted option to `国家EU`. Multiple matching UK rows remain unbound rather
+than guessed.
 
 For repeated EU applications, pass the exact option so suffixes are preserved:
 
@@ -75,6 +91,10 @@ Test a binding without submitting or changing Feishu:
   are never classified as `假过`; they become retryable `verification_pending`
   or `blocked`.
 - Explicit decline wording becomes `declined` / Excel `已拒绝`.
+- Explicit acceptance wording such as "completed our review and accepted your
+  application" is approval wording; explicit brand/GTIN decline wording and
+  supported local-language rejection templates are decline wording. This
+  includes the German template `mussten wir Ihren Antrag ablehnen`.
 - Requests for evidence or documents become `action_required` / Excel `待补充材料`.
 - An unclassified Amazon reply becomes `answered_unknown` / Excel `待人工复核`.
 - No Amazon message becomes `pending` and is rescheduled after
@@ -132,3 +152,21 @@ for more than one hour is returned to the retry queue on the next worker start.
 
 Checks run sequentially. Do not deliberately run a submission batch and a Case
 follow-up against the same AdsPower profile at the same time.
+
+## AdsPower/CDP recovery
+
+Browser attachment uses three readiness layers: AdsPower active state, TCP plus
+DevTools `/json/version`, and a real Playwright CDP handshake. The handshake has
+an explicit 30-second timeout. If any layer fails, the manager fully stops and
+restarts the profile once with `--remote-allow-origins=*`, waits for DevTools to
+become ready, and retries the handshake once.
+
+Case checks detach Playwright when finished and leave the AdsPower profile
+running. They stop the profile only as part of an explicit recovery restart.
+This avoids a remote `browser.close()` racing with the next task.
+
+If recovery is exhausted, the result remains a retryable technical error. With
+`connection_circuit_breaker: true`, other due tasks for the same account are
+deferred to the same error-retry time instead of each waiting for another CDP
+timeout. A Seller Central `ERR_SOCKS_CONNECTION_FAILED` is stored separately as
+`proxy_connection_failed`; it is a proxy/network fault, not a Case outcome.

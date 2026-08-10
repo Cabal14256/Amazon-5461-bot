@@ -11,8 +11,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
-
+from typing import Any
 
 CASE_DASHBOARD_URLS = {
     "amazon.co.uk": "https://sellercentral.amazon.co.uk/hz/myqdashboard/ref=xx_myqd_favb_xx",
@@ -34,13 +33,17 @@ SITE_DOMAINS = {
     "MX": "amazon.com.mx",
     "UK": "amazon.co.uk",
     "BE": "amazon.co.uk",
-    "NL": "amazon.nl",
-    "SE": "amazon.se",
-    "DE": "amazon.de",
-    "FR": "amazon.fr",
-    "ES": "amazon.es",
-    "IT": "amazon.it",
-    "PL": "amazon.pl",
+    # Seller Central's EU session is shared through amazon.co.uk.  The
+    # marketplace switcher selects Germany/France/etc. inside that session;
+    # navigating to the retail-country Seller Central domain can instead land
+    # on /ap/signin even though the EU portal is already authenticated.
+    "NL": "amazon.co.uk",
+    "SE": "amazon.co.uk",
+    "DE": "amazon.co.uk",
+    "FR": "amazon.co.uk",
+    "ES": "amazon.co.uk",
+    "IT": "amazon.co.uk",
+    "PL": "amazon.co.uk",
 }
 
 STATUS_PATTERNS = [
@@ -87,7 +90,7 @@ def _safe_text(page) -> str:
         return ""
 
 
-def _safe_screenshot(page, path: Path) -> Optional[str]:
+def _safe_screenshot(page, path: Path) -> str | None:
     try:
         page.screenshot(path=str(path), full_page=False, timeout=15000)
         return str(path)
@@ -104,9 +107,9 @@ def _safe_screenshot(page, path: Path) -> Optional[str]:
             return None
 
 
-def _navigate_resilient(page, url: str, timeout_ms: int = 60000) -> Tuple[bool, str]:
+def _navigate_resilient(page, url: str, timeout_ms: int = 60000) -> tuple[bool, str]:
     """Navigate conservatively across Seller Central redirects/account-switcher quirks."""
-    errors: List[str] = []
+    errors: list[str] = []
     attempts = [
         ("domcontentloaded", False),
         ("commit", True),
@@ -142,7 +145,7 @@ def _navigate_resilient(page, url: str, timeout_ms: int = 60000) -> Tuple[bool, 
     return False, " | ".join(errors)[-2000:]
 
 
-def _brand_windows(text: str, brand_name: str, radius: int = 1800) -> List[str]:
+def _brand_windows(text: str, brand_name: str, radius: int = 1800) -> list[str]:
     windows = []
     if not text:
         return windows
@@ -159,7 +162,7 @@ def _brand_windows(text: str, brand_name: str, radius: int = 1800) -> List[str]:
     return windows
 
 
-def _extract_application_id(text: str) -> Optional[str]:
+def _extract_application_id(text: str) -> str | None:
     patterns = [
         r"applicationId[=:]\s*([A-Za-z0-9_-]+)",
         r"application(?:\s+)?id\s*[:#]?\s*([A-Za-z0-9_-]{6,})",
@@ -171,7 +174,7 @@ def _extract_application_id(text: str) -> Optional[str]:
     return None
 
 
-def _parse_dashboard_rows(text: str) -> List[Dict[str, str]]:
+def _parse_dashboard_rows(text: str) -> list[dict[str, str]]:
     """
     Parse structured rows from the View Selling Applications table.
 
@@ -202,7 +205,7 @@ def _parse_dashboard_rows(text: str) -> List[Dict[str, str]]:
         "pending": "pending",
     }
 
-    lines = [l.strip() for l in text.replace("\t", "\n").splitlines()]
+    lines = [line.strip() for line in text.replace("\t", "\n").splitlines()]
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -242,7 +245,77 @@ def _parse_dashboard_rows(text: str) -> List[Dict[str, str]]:
     return rows
 
 
-def analyze_dashboard_text(text: str, brand_name: str) -> Dict[str, Any]:
+def _extract_dashboard_dom_rows(page) -> list[dict[str, Any]]:
+    """Read Case IDs hidden in ``kat-link`` attributes on dashboard rows.
+
+    Amazon's data table paints the Case ID from a ``kat-link[label]`` custom
+    element.  The number is visible in screenshots but is absent from
+    ``document.body.innerText``, so text-only parsing cannot recover it.
+    """
+
+    try:
+        rows = page.evaluate(
+            r"""() => Array.from(document.querySelectorAll('tr')).map(row => {
+              const caseIds = [];
+              for (const link of row.querySelectorAll('kat-link, a')) {
+                const values = [
+                  link.getAttribute('label') || '',
+                  link.textContent || '',
+                  link.getAttribute('href') || ''
+                ];
+                for (const value of values) {
+                  for (const match of value.matchAll(/(?<!\d)(\d{10,12})(?!\d)/g)) {
+                    if (!caseIds.includes(match[1])) caseIds.push(match[1]);
+                  }
+                }
+              }
+              if (!caseIds.length) return null;
+              const nameCell = row.querySelector('.application-name-cell, .application-name-column');
+              const name = (nameCell && (nameCell.innerText || nameCell.textContent) || '')
+                .trim().replace(/\s+/g, ' ');
+              const text = (row.innerText || row.textContent || '').trim().replace(/\s+/g, ' ');
+              return {name, text, case_ids: caseIds};
+            }).filter(Boolean)"""
+        )
+    except Exception:
+        return []
+    return [row for row in (rows or []) if isinstance(row, dict)]
+
+
+def analyze_dashboard_dom_rows(
+    rows: list[dict[str, Any]], brand_name: str
+) -> dict[str, Any] | None:
+    """Return an exact-brand result from structured dashboard DOM rows."""
+
+    target = (brand_name or "").strip().casefold()
+    for row in rows or []:
+        name = str(row.get("name") or "").strip()
+        if name.casefold() != target:
+            continue
+        text = str(row.get("text") or "")
+        text_lower = text.casefold()
+        status = "unknown"
+        for candidate, keywords in STATUS_PATTERNS:
+            if any(keyword in text_lower for keyword in keywords):
+                status = candidate
+                break
+        case_ids = [
+            str(value)
+            for value in (row.get("case_ids") or [])
+            if re.fullmatch(r"\d{10,12}", str(value))
+        ]
+        return {
+            "status": status,
+            "case_id": case_ids[0] if case_ids else None,
+            "case_ids": case_ids,
+            "application_id": _extract_application_id(text),
+            "matched_text": text[:1200],
+            "brand_mentions": 1,
+        }
+    return None
+
+
+def analyze_dashboard_text(text: str, brand_name: str) -> dict[str, Any]:
     """Return best-effort status/case information from dashboard text.
 
     Fixes: when a brand has both a Catalog Authorization row and a GTIN Exemption
@@ -337,7 +410,7 @@ def check_case_dashboard_for_brand(
     brand_name: str,
     evidence_dir: Path,
     timeout_sec: int = 60,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Inspect Case Dashboard for a brand.
 
@@ -345,10 +418,10 @@ def check_case_dashboard_for_brand(
     """
     out_dir = Path(evidence_dir) / "dashboard_check"
     out_dir.mkdir(parents=True, exist_ok=True)
-    evidence_files: List[str] = []
+    evidence_files: list[str] = []
     started = datetime.now().isoformat()
 
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "checked": False,
         "status": "unknown",
         "case_id": None,
@@ -410,6 +483,13 @@ def check_case_dashboard_for_brand(
         evidence_files.append(str(text_path))
 
         analysis = analyze_dashboard_text(text, brand_name)
+        dom_rows = _extract_dashboard_dom_rows(page)
+        dom_analysis = analyze_dashboard_dom_rows(dom_rows, brand_name)
+        if dom_analysis is not None:
+            analysis = dom_analysis
+            dom_path = out_dir / "dashboard_dom_rows.json"
+            dom_path.write_text(json.dumps(dom_rows, ensure_ascii=False, indent=2), encoding="utf-8")
+            evidence_files.append(str(dom_path))
         result.update(analysis)
         result["checked"] = True
 

@@ -205,30 +205,40 @@ def upload_sq_documents(page: Page, upload_files: list[str]) -> Dict[str, Any]:
         result["error"] = "no_files"
         return result
     try:
-        page.locator('input[type="file"]').first.set_input_files(files)
+        file_input = page.locator('input[type="file"]').first
+        file_input.set_input_files(files, timeout=30000)
         deadline = time.time() + 45
         while time.time() < deadline:
             time.sleep(3)
-            body = (page.locator("body").inner_text(timeout=10000) or "").lower()
-            if "document upload failed" in body or "upload failed" in body:
+            body = page.locator("body").inner_text(timeout=10000) or ""
+            body_lower = body.lower()
+            if "document upload failed" in body_lower or "upload failed" in body_lower:
                 result["error"] = "document_upload_failed"
                 return result
             try:
-                selected = page.locator('input[type="file"]').first.evaluate(
+                selected = file_input.evaluate(
                     "el => el.files ? el.files.length : 0"
                 )
             except Exception:
                 selected = 0
-            if selected >= len(files):
+            # Amazon clears the native input after ingesting the files and then
+            # renders one removable file card per uploaded filename.  Either
+            # state is valid evidence that all requested files were accepted.
+            uploaded_cards_visible = all(
+                Path(file_name).name.casefold() in body.casefold()
+                for file_name in files
+            )
+            if selected >= len(files) or uploaded_cards_visible:
                 # Give the server-side upload UI time to surface validation errors.
                 time.sleep(6)
                 body = (page.locator("body").inner_text(timeout=10000) or "").lower()
                 if "document upload failed" in body or "upload failed" in body:
                     result["error"] = "document_upload_failed"
                     return result
-                break
-        result["ok"] = True
-        result["count"] = len(files)
+                result["ok"] = True
+                result["count"] = len(files)
+                return result
+        result["error"] = "document_upload_confirmation_timeout"
         return result
     except Exception as e:
         result["error"] = str(e)

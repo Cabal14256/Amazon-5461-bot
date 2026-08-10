@@ -9,6 +9,11 @@ browser:
   headless: false
   action_timeout_ms: 20000
   page_timeout_ms: 45000
+  cdp_connect_timeout_ms: 30000
+  cdp_health_timeout_sec: 5
+  cdp_ready_timeout_sec: 30
+  cdp_restart_attempts: 1
+  profile_restart_wait_sec: 5
 
 run:
   require_human_confirm_before_submit: true
@@ -33,24 +38,30 @@ case_followup:
   error_retry_interval_hours: 1.0
   max_attempts: 12
   poll_interval_seconds: 60
+  connection_circuit_breaker: true
   auto_start_worker: true
   registration_path: "./data/5461申请登记表.xlsx"
 
-# Read-only binding is safe to enable after the app/table identifiers are set
-# in .env. Real Bitable writes stay disabled until dry-run output is reviewed.
+# Binding and missing-row planning are safe to enable after app/table identifiers
+# are set in .env. Real creates/updates stay disabled until dry-run is reviewed.
 feishu_bitable:
   enabled: false
   bind_on_schedule: true
+  create_missing_records: false
   write_enabled: false
   request_timeout_seconds: 20
   max_candidate_records: 100
+  eu_progress_target_option: "英国"
   field_map:
     account: "账号"
     country: "国家"
     country_eu: "国家EU"
     brand: "品牌"
     sku: "SKU"
+    title: "标题"
+    content: "发信内容"
     progress: "5461进度"
+    remark: "备注"
   country_option_site_map:
     比利时: "BE"
     瑞典: "SE"

@@ -36,6 +36,19 @@ When automation stalls or throws errors, follow this 6-step diagnostic flow:
 | `Locator.fill` fails on kat-input | kat-input is a Shadow DOM component | Fall back to JS fill method |
 | Apply to sell popup invisible | `panelVisible='true'` but `display='none'` | Force-show via JS styling |
 
+## AdsPower/CDP connection failures
+
+- `connect_over_cdp` timeout: treat the returned endpoint as stale or
+  half-ready. Check TCP and `/json/version`, then fully stop/start the profile
+  once and retry the Playwright handshake with a 30-second timeout.
+- `ERR_SOCKS_CONNECTION_FAILED`: CDP may be healthy; the AdsPower proxy cannot
+  reach Seller Central. Verify the proxy/network by loading the marketplace
+  home page before retrying Case work.
+- Do not let every brand repeat the same profile failure. After bounded recovery
+  is exhausted, defer the remaining due tasks for that account.
+- Detach Playwright after a check; do not call remote `browser.close()` unless
+  intentionally stopping the AdsPower profile.
+
 ---
 
 ## Amazon-Side Errors

@@ -1,6 +1,36 @@
 import auto_add_account_data as module
 
 
+def test_normalize_uk_statement_description_replaces_legacy_field():
+    content = (
+        "Brand：HOMEMO\n"
+        "Item description：Screen Protector for an unrelated model\n"
+        "SKU：672-UK-HOMEMO-SP-001\n"
+        "Item model：SP-001\n"
+    )
+
+    result = module.normalize_uk_statement_description(content, "HOMEMO")
+
+    assert "Item description：" not in result
+    assert (
+        "Item desrciption：Screen Protector for SP-001  6.10 Inch,  "
+        "2+2Pack, Tempered Glass Film"
+    ) in result
+
+
+def test_normalize_uk_statement_description_uses_vasg_template():
+    content = (
+        "Brand：VASG\n"
+        "Item desrciption：\n"
+        "SKU：672-UK-VASG-SP-001\n"
+        "Item model：SP-001\n"
+    )
+
+    result = module.normalize_uk_statement_description(content, "VASG")
+
+    assert "Item desrciption：smart-watch-screen-protectors for 44 mm" in result
+
+
 def test_empty_site_row_reuses_existing_statement(monkeypatch, tmp_path):
     brand = "V-PORYADKU"
     docs = tmp_path / brand / "docs"
