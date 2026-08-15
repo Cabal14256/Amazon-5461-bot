@@ -283,11 +283,14 @@ def _extract_dashboard_dom_rows(page) -> list[dict[str, Any]]:
 
 
 def analyze_dashboard_dom_rows(
-    rows: list[dict[str, Any]], brand_name: str
+    rows: list[dict[str, Any]],
+    brand_name: str,
+    submitted_at: str | None = None,
 ) -> dict[str, Any] | None:
     """Return an exact-brand result from structured dashboard DOM rows."""
 
     target = (brand_name or "").strip().casefold()
+    exact_rows = []
     for row in rows or []:
         name = str(row.get("name") or "").strip()
         if name.casefold() != target:
@@ -304,15 +307,63 @@ def analyze_dashboard_dom_rows(
             for value in (row.get("case_ids") or [])
             if re.fullmatch(r"\d{10,12}", str(value))
         ]
-        return {
-            "status": status,
-            "case_id": case_ids[0] if case_ids else None,
-            "case_ids": case_ids,
-            "application_id": _extract_application_id(text),
-            "matched_text": text[:1200],
-            "brand_mentions": 1,
-        }
-    return None
+        exact_rows.append({"text": text, "status": status, "case_ids": case_ids})
+    if not exact_rows:
+        return None
+
+    catalog_rows = [
+        row
+        for row in exact_rows
+        if "catalog authorization" in row["text"].casefold()
+        or "catalogue authorisation" in row["text"].casefold()
+    ]
+    candidates = catalog_rows or exact_rows
+    submitted_date = None
+    if submitted_at:
+        try:
+            submitted_date = datetime.fromisoformat(
+                str(submitted_at).replace("Z", "+00:00")
+            ).date()
+        except ValueError:
+            submitted_date = None
+    if submitted_date:
+        dated_candidates = []
+        for row in candidates:
+            row_dates = []
+            for value, date_format in [
+                *[
+                    (match, "%b %d, %Y")
+                    for match in re.findall(r"\b[A-Z][a-z]{2} \d{1,2}, \d{4}\b", row["text"])
+                ],
+                *[
+                    (match, "%d %b %Y")
+                    for match in re.findall(r"\b\d{1,2} [A-Z][a-z]{2} \d{4}\b", row["text"])
+                ],
+            ]:
+                try:
+                    row_dates.append(datetime.strptime(value, date_format).date())
+                except ValueError:
+                    pass
+            if any(abs((row_date - submitted_date).days) <= 1 for row_date in row_dates):
+                dated_candidates.append(row)
+        if dated_candidates:
+            candidates = dated_candidates
+    priority = {"under_review": 0, "approved": 1, "draft": 2, "declined": 3, "unknown": 9}
+    candidates.sort(key=lambda row: priority.get(row["status"], 8))
+    case_ids: list[str] = []
+    for row in candidates:
+        for case_id in row["case_ids"]:
+            if case_id not in case_ids:
+                case_ids.append(case_id)
+    matched_text = " ; ".join(row["text"] for row in candidates)
+    return {
+        "status": candidates[0]["status"],
+        "case_id": case_ids[0] if len(case_ids) == 1 else None,
+        "case_ids": case_ids,
+        "application_id": _extract_application_id(matched_text),
+        "matched_text": matched_text[:1200],
+        "brand_mentions": len(candidates),
+    }
 
 
 def analyze_dashboard_text(text: str, brand_name: str) -> dict[str, Any]:
@@ -410,6 +461,7 @@ def check_case_dashboard_for_brand(
     brand_name: str,
     evidence_dir: Path,
     timeout_sec: int = 60,
+    submitted_at: str | None = None,
 ) -> dict[str, Any]:
     """
     Inspect Case Dashboard for a brand.
@@ -484,7 +536,11 @@ def check_case_dashboard_for_brand(
 
         analysis = analyze_dashboard_text(text, brand_name)
         dom_rows = _extract_dashboard_dom_rows(page)
-        dom_analysis = analyze_dashboard_dom_rows(dom_rows, brand_name)
+        dom_analysis = analyze_dashboard_dom_rows(
+            dom_rows,
+            brand_name,
+            submitted_at=submitted_at,
+        )
         if dom_analysis is not None:
             analysis = dom_analysis
             dom_path = out_dir / "dashboard_dom_rows.json"

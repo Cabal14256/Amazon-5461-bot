@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "codex-repair-result",
+  "description": "Stage-7 isolated patch generation result for one repair incident (blueprint section 16.1 stage B / 17.3).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "changed_files",
+    "risk_level",
+    "requires_human_review",
+    "tests_added",
+    "tests_ran",
+    "tests_passed",
+    "notes"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": []
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["R0", "R1", "R2", "R3"]
+    },
+    "requires_human_review": {
+      "type": "boolean"
+    },
+    "tests_added": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": []
+    },
+    "tests_ran": {
+      "type": "boolean"
+    },
+    "tests_passed": {
+      "type": "boolean"
+    },
+    "notes": {
+      "type": "string",
+      "default": ""
+    }
+  }
+}

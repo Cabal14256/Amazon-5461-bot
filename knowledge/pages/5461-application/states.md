@@ -2,7 +2,35 @@
 
 > 页面: 5461 申请表单
 > URL 模式: /sq/approvalrequest, /seller-qualification, /listing/approval
-> 最后更新: 2026-05-19
+> 最后更新: 2026-08-14
+
+---
+
+## state: application_type_selection
+- **识别信号**: 右侧 Apply to sell 面板包含 `Application to create new ASINs for <当前品牌>`
+- **检测方法**:
+  - element: 可见 `kat-panel-wrapper`
+  - text: 精确包含当前品牌的 `Application to create new ASINs for ...`
+  - text: 同时存在 `Application to sell ... products` 也不影响本状态
+- **推荐动作**: 只点击当前品牌的 create-new-ASINs 卡片；等待真实 5461 字段出现
+- **下一状态列表**: form_loading, form_ready, application_type_unknown
+- **优先级**: 100 (业务状态)
+
+---
+
+## state: application_sell_only
+- **识别信号**: 面板只有 `Application to sell <品牌> products`，没有 create-new-ASINs 卡片
+- **推荐动作**: 不自动点击，停止当前品牌并要求人工确认创建新 ASIN 的申请路径
+- **下一状态列表**: done (human review)
+- **优先级**: 100 (业务状态)
+
+---
+
+## state: application_type_unknown
+- **识别信号**: 面板出现其他无法识别的 `Application to...` 组合
+- **推荐动作**: 不点击；保存截图和 DOM 摘要，记录 `state_unknown` incident
+- **下一状态列表**: done (human review)
+- **优先级**: 800 (系统异常)
 
 ---
 

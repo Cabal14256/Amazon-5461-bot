@@ -1,10 +1,16 @@
+import json
+
 import pytest
 
+import src.approved_case_verification as approved_verification
 from src.approved_case_verification import (
     _connect_approval_message_matches,
+    _connect_brand_config_for_brand,
+    _manage_brands_direct_url,
     choose_connect_brand_candidate,
     combine_approved_verification,
     get_approved_verification_config,
+    verify_manage_brand,
 )
 
 
@@ -93,29 +99,102 @@ def test_nested_configuration_keeps_safe_defaults():
     assert config["add_product"]["allow_new_ui_submit_as_continue"] is True
 
 
+def test_brand_manifest_description_overrides_generic_connect_keywords(tmp_path):
+    brand_dir = tmp_path / "DEMO_WILL"
+    brand_dir.mkdir()
+    description = "Brand offering toys, sporting goods, and household items."
+    (brand_dir / "manifest.json").write_text(
+        json.dumps({"brand_selection_keywords": [description]}),
+        encoding="utf-8",
+    )
+
+    config = _connect_brand_config_for_brand(
+        {"category_keywords": ["screen protector"]}, "DEMO_WILL", tmp_path
+    )
+
+    assert config["category_keywords"] == [description]
+
+
+@pytest.mark.parametrize(
+    ("home_url", "expected"),
+    [
+        (
+            "https://sellercentral.amazon.com/home",
+            "https://sellercentral.amazon.com/manage-your-brands?ref_=xx_myb_favb_xx",
+        ),
+        (
+            "https://sellercentral.amazon.co.uk/home",
+            "https://sellercentral.amazon.co.uk/manage-your-brands?ref_=xx_myb_favb_xx",
+        ),
+    ],
+)
+def test_manage_brands_direct_url_uses_the_seller_central_region(home_url, expected):
+    assert _manage_brands_direct_url(home_url) == expected
+
+
+def test_manage_brand_navigation_falls_back_to_direct_url(monkeypatch, tmp_path):
+    class FakePage:
+        url = "https://sellercentral.amazon.co.uk/home"
+
+    page = FakePage()
+    visited: list[str] = []
+
+    def fake_goto(target_page, url, _timeout_ms):
+        visited.append(url)
+        target_page.url = url
+
+    monkeypatch.setattr(approved_verification, "_goto", fake_goto)
+    monkeypatch.setattr(approved_verification, "_page_text", lambda _page: "Manage Your Brands")
+    monkeypatch.setattr(approved_verification, "_auth_block_reason", lambda _page, _text="": None)
+    monkeypatch.setattr(
+        approved_verification,
+        "_click_manage_brands_link",
+        lambda _page, _labels, _timeout_ms: {"opened": False, "method": "not_found"},
+    )
+    monkeypatch.setattr(approved_verification, "_save_evidence", lambda *_args: [])
+    monkeypatch.setattr(approved_verification, "_brand_visible_on_manage_page", lambda *_args: True)
+
+    result = verify_manage_brand(
+        page,
+        "TEST-BRAND",
+        "https://sellercentral.amazon.co.uk/home",
+        {
+            "menu_labels": ["Manage Your Brands"],
+            "page_markers": ["Manage Your Brands"],
+            "settle_seconds": 0,
+        },
+        tmp_path,
+        page_timeout_ms=45_000,
+    )
+
+    assert result["result"] == "found"
+    assert result["navigation"]["method"] == "direct_url_fallback"
+    assert visited[-1] == "https://sellercentral.amazon.co.uk/manage-your-brands?ref_=xx_myb_favb_xx"
+
+
 def test_connect_candidate_requires_exact_brand_and_screen_protector_context():
     candidates = [
         {
             "index": 0,
-            "name": "WILLONE",
+            "name": "DEMO_WILL",
             "description": "Shoes and apparel",
-            "text": "WILLONE\nShoes and apparel",
+            "text": "DEMO_WILL\nShoes and apparel",
         },
         {
             "index": 1,
-            "name": "WILLONE",
+            "name": "DEMO_WILL",
             "description": "Phone screen protectors and protective accessories",
-            "text": "WILLONE\nPhone screen protectors and protective accessories",
+            "text": "DEMO_WILL\nPhone screen protectors and protective accessories",
         },
         {
             "index": 2,
-            "name": "WILLONE PRO",
+            "name": "DEMO_WILL PRO",
             "description": "Screen protectors",
-            "text": "WILLONE PRO\nScreen protectors",
+            "text": "DEMO_WILL PRO\nScreen protectors",
         },
     ]
     result = choose_connect_brand_candidate(
-        candidates, "WILLONE", ["screen protector", "screen protectors"]
+        candidates, "DEMO_WILL", ["screen protector", "screen protectors"]
     )
     assert result["status"] == "matched"
     assert result["candidate"]["index"] == 1
@@ -123,19 +202,19 @@ def test_connect_candidate_requires_exact_brand_and_screen_protector_context():
 
 def test_connect_candidate_refuses_multiple_relevant_exact_matches():
     candidates = [
-        {"index": 0, "name": "JZG", "text": "JZG\nScreen protectors"},
-        {"index": 1, "name": "JZG", "text": "JZG\nMobile screen protection"},
+        {"index": 0, "name": "DEMO_JADE", "text": "DEMO_JADE\nScreen protectors"},
+        {"index": 1, "name": "DEMO_JADE", "text": "DEMO_JADE\nMobile screen protection"},
     ]
     result = choose_connect_brand_candidate(
-        candidates, "JZG", ["screen protectors", "screen protection"]
+        candidates, "DEMO_JADE", ["screen protectors", "screen protection"]
     )
     assert result["status"] == "ambiguous"
 
 
 def test_connect_approval_message_must_name_the_expected_brand():
     text = (
-        "You are approved to list VASG products. "
+        "You are approved to list DEMO_VISTA products. "
         "You can close this panel and continue listing."
     )
-    assert _connect_approval_message_matches(text, "VASG")
-    assert not _connect_approval_message_matches(text, "WILLONE")
+    assert _connect_approval_message_matches(text, "DEMO_VISTA")
+    assert not _connect_approval_message_matches(text, "DEMO_WILL")

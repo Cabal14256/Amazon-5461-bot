@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "case-reply-classification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "classification",
+    "confidence",
+    "reason",
+    "requires_human_review"
+  ],
+  "properties": {
+    "classification": {
+      "type": "string",
+      "enum": ["approved", "declined", "action_required", "unknown"]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "reason": {
+      "type": "string"
+    },
+    "requires_human_review": {
+      "type": "boolean"
+    }
+  }
+}

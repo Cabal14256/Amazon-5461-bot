@@ -388,9 +388,37 @@ class AdsPowerClient:
         Returns:
             Profile 详细信息，包括 username、cookie 等
         """
-        params = {"profile_id": profile_id}
-        
         errors = []
+
+        # AdsPower's documented V2 profile lookup is the list endpoint with a
+        # profile_id filter.  It is a POST endpoint (not a GET detail endpoint)
+        # and may include sensitive platform fields, so callers must keep the
+        # returned profile in memory and must not log it.
+        try:
+            raw = self._request_json(
+                "POST",
+                "/api/v2/browser-profile/list",
+                json_body={"profile_id": [str(profile_id)], "page": 1, "limit": 1},
+            )
+            data = raw.get("data") or {}
+            profiles = data.get("list") or []
+            if not profiles:
+                raise AdsPowerAPIError("V2 profile query returned no matching profile")
+            profile = profiles[0]
+            return {
+                "ok": True,
+                "profile": profile,
+                "profile_id": profile.get("profile_id") or profile.get("user_id"),
+                "profile_name": profile.get("profile_name") or profile.get("name"),
+                "username": profile.get("username") or profile.get("login") or profile.get("email"),
+                "remark": profile.get("remark") or profile.get("note"),
+                "group_id": profile.get("group_id"),
+                "cookie": profile.get("cookie"),
+            }
+        except Exception as e:
+            errors.append(f"v2 list lookup failed: {e}")
+
+        params = {"profile_id": profile_id}
         try:
             raw = self._request_json("GET", "/api/v2/browser-profile/detail", params=params)
             data = raw.get("data", {})
@@ -445,32 +473,48 @@ class AdsPowerClient:
                 "page": int
             }
         """
-        params = {
+        v1_params = {
             "page": str(page),
             "page_size": str(page_size),
         }
         if group_id:
-            params["group_id"] = group_id
+            v1_params["group_id"] = group_id
         if search_value:
-            params["search_value"] = search_value
+            v1_params["search_value"] = search_value
+
+        v2_body: dict[str, Any] = {
+            "page": int(page),
+            "limit": int(page_size),
+        }
+        if group_id:
+            v2_body["group_id"] = str(group_id)
+        if search_value:
+            # Retain AdsPower's existing fuzzy-search extension for installed
+            # versions that support it.  Exact profile lookups use
+            # get_profile_detail(), which sends the documented profile_id list.
+            v2_body["search_value"] = str(search_value)
         
         errors = []
         try:
-            raw = self._request_json("GET", "/api/v2/browser-profile/list", params=params)
+            raw = self._request_json(
+                "POST",
+                "/api/v2/browser-profile/list",
+                json_body=v2_body,
+            )
             data = raw.get("data", {})
             return {
                 "ok": True,
                 "profiles": data.get("list", []),
-                "total": data.get("total", 0),
+                "total": data.get("total_count", data.get("total", 0)),
                 "page": data.get("page", page),
-                "page_size": data.get("page_size", page_size),
+                "page_size": data.get("limit", data.get("page_size", page_size)),
             }
         except Exception as e:
             errors.append(f"v2 list failed: {e}")
         
         # 尝试 v1 API
         try:
-            raw = self._request_json("GET", "/api/v1/user/list", params=params)
+            raw = self._request_json("GET", "/api/v1/user/list", params=v1_params)
             data = raw.get("data", {})
             profiles = data.get("list", [])
             # v1 API 返回格式可能不同，做适配。

@@ -1,8 +1,8 @@
 """Feishu Bitable access and conservative 5461 record binding.
 
-The integration deliberately separates read-only record binding from writes.
-Scheduling a Case follow-up may locate and persist an existing Feishu
-``record_id``; it never creates a row and never changes a Bitable cell.
+The integration deliberately separates record binding from writes. Missing-row
+creation and progress updates are both protected by the explicit Feishu write
+gate; read-only planning remains available while writes are disabled.
 """
 
 from __future__ import annotations
@@ -120,6 +120,7 @@ class FeishuBitableConfig:
     request_timeout_seconds: float = 20.0
     max_candidate_records: int = 100
     eu_progress_target_option: str = "英国"
+    na_progress_target_site: str = "US"
     account_value_template: str = "正常号-{suffix}-{digits}"
     field_map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
     country_option_site_map: dict[str, str] = field(
@@ -186,6 +187,7 @@ def get_feishu_bitable_config(settings: Mapping[str, Any] | None = None) -> Feis
         request_timeout_seconds=float(configured.get("request_timeout_seconds", 20.0)),
         max_candidate_records=max(1, int(configured.get("max_candidate_records", 100))),
         eu_progress_target_option=str(configured.get("eu_progress_target_option") or "英国"),
+        na_progress_target_site=str(configured.get("na_progress_target_site") or "US").upper(),
         account_value_template=str(
             configured.get("account_value_template") or "正常号-{suffix}-{digits}"
         ),
@@ -617,6 +619,38 @@ class FeishuBitableClient:
                 matches.append(record)
         return matches
 
+    def _site_progress_records(
+        self,
+        records: list[dict[str, Any]],
+        account_id: str,
+        brand_name: str,
+        target_site: str,
+    ) -> list[dict[str, Any]]:
+        field_map = self.config.field_map
+        target = str(target_site or "").strip().upper()
+        aliases = {
+            "US": {"us", "usa", "united states", "美国"},
+            "MX": {"mx", "mexico", "墨西哥"},
+        }.get(target, {target.casefold()})
+        return [
+            record
+            for record in records
+            if _account_matches(
+                _scalar_text((record.get("fields") or {}).get(field_map["account"])),
+                account_id,
+                target,
+                self.config.account_suffix_by_site,
+            )
+            and _scalar_text(
+                (record.get("fields") or {}).get(field_map["brand"])
+            ).casefold()
+            == brand_name.strip().casefold()
+            and _scalar_text(
+                (record.get("fields") or {}).get(field_map["country"])
+            ).strip().casefold()
+            in aliases
+        ]
+
     def _create_record(
         self,
         fields: Mapping[str, Any],
@@ -721,6 +755,9 @@ class FeishuBitableClient:
         uk_sku: str = "",
         uk_title: str = "",
         uk_content: str = "",
+        us_sku: str = "",
+        us_title: str = "",
+        us_content: str = "",
         dry_run: bool = True,
     ) -> dict[str, Any]:
         """Create missing detail/shared rows without inventing application data."""
@@ -808,13 +845,27 @@ class FeishuBitableClient:
             and site_code != target_site
             and site_suffix.upper() == target_suffix.upper()
         )
+        na_target_site = self.config.na_progress_target_site.strip().upper()
+        uses_us_shared_progress = bool(site_code == "MX" and na_target_site == "US")
 
-        shared = self._uk_progress_records(records, account_id, brand)
+        shared = (
+            self._uk_progress_records(records, account_id, brand)
+            if uses_uk_shared_progress
+            else self._site_progress_records(records, account_id, brand, na_target_site)
+            if uses_us_shared_progress
+            else []
+        )
         if uses_uk_shared_progress and len(shared) > 1:
             return {
                 "status": "ambiguous",
                 "detail": {"status": "not_changed"},
                 "shared": {"status": "multiple_uk_records"},
+            }
+        if uses_us_shared_progress and len(shared) > 1:
+            return {
+                "status": "ambiguous",
+                "detail": {"status": "not_changed"},
+                "shared": {"status": "multiple_us_records"},
             }
 
         detail_result: dict[str, Any]
@@ -839,7 +890,7 @@ class FeishuBitableClient:
                 detail_fields[field_map["country_eu"]] = [target_option]
             detail_result = self._create_record(detail_fields, dry_run=dry_run)
 
-        if not uses_uk_shared_progress:
+        if not uses_uk_shared_progress and not uses_us_shared_progress:
             return {
                 "status": (
                     "ready"
@@ -850,6 +901,47 @@ class FeishuBitableClient:
                 ),
                 "detail": detail_result,
                 "shared": dict(detail_result),
+            }
+
+        if uses_us_shared_progress:
+            if shared:
+                shared_result = {
+                    "status": "existing",
+                    "record_id": str(shared[0].get("record_id") or ""),
+                }
+            elif not all(
+                (str(us_sku).strip(), str(us_title).strip(), str(us_content).strip())
+            ):
+                shared_result = {"status": "missing_us_materials", "record_id": ""}
+            else:
+                shared_account_value = self._account_display_value(
+                    account_id,
+                    na_target_site,
+                    records,
+                )
+                if not shared_account_value:
+                    shared_result = {"status": "account_value_unresolved", "record_id": ""}
+                else:
+                    shared_fields = {
+                        field_map["account"]: shared_account_value,
+                        field_map["country"]: na_target_site,
+                        field_map["brand"]: brand,
+                        field_map["sku"]: str(us_sku).strip(),
+                        field_map["title"]: str(us_title).strip(),
+                        field_map["content"]: str(us_content).strip(),
+                    }
+                    shared_result = self._create_record(shared_fields, dry_run=dry_run)
+            statuses = {detail_result.get("status"), shared_result.get("status")}
+            if statuses <= {"existing", "created", "updated"}:
+                overall_status = "ready"
+            elif statuses <= {"existing", "would_create", "would_update"}:
+                overall_status = "dry_run"
+            else:
+                overall_status = "partial"
+            return {
+                "status": overall_status,
+                "detail": detail_result,
+                "shared": shared_result,
             }
 
         desired_options = _unique_strings([target_option, submitted_option])
@@ -933,6 +1025,7 @@ class FeishuBitableClient:
         records: list[dict[str, Any]] = []
         used_country_fallback = False
         used_eu_progress_target = False
+        used_na_progress_target = False
         candidate_count = 0
 
         # Non-UK EU applications intentionally share the existing UK row's
@@ -988,13 +1081,38 @@ class FeishuBitableClient:
                 used_country_fallback = True
                 used_eu_progress_target = True
 
-        if not records:
+        # Mexico shares the US row's single progress cell. The MX detail row
+        # remains distinct, but its newest result overwrites the US progress.
+        na_target_site = self.config.na_progress_target_site.strip().upper()
+        if not records and site_code == "MX" and na_target_site == "US":
+            used_na_progress_target = True
+            account_brand_records = self.search_candidate_records(
+                account_id, site_code, brand_name
+            )
+            candidate_count = len(account_brand_records)
+            target_records = self._site_progress_records(
+                account_brand_records,
+                account_id,
+                brand_name,
+                na_target_site,
+            )
+            if len(target_records) > 1:
+                return FeishuBindingResult(
+                    "ambiguous",
+                    "multiple US Feishu records matched the shared NA progress target",
+                    candidate_count=candidate_count,
+                )
+            if len(target_records) == 1:
+                records = target_records
+                used_country_fallback = True
+
+        if not records and not used_na_progress_target:
             records = self.search_candidate_records(account_id, site_code, brand_name, sku)
             candidate_count = len(records)
         # Some existing EU rows intentionally reuse their UK SKU while 国家EU
         # contains the latest submitted country.  When the exact site SKU is not
         # present, an explicit country option may safely narrow account+brand rows.
-        if not records and requested_option:
+        if not records and requested_option and not used_na_progress_target:
             records = self.search_candidate_records(account_id, site_code, brand_name)
             used_country_fallback = True
             candidate_count = len(records)
@@ -1014,7 +1132,7 @@ class FeishuBitableClient:
             if not _account_matches(
                 _scalar_text(fields.get(field_map["account"])),
                 account_id,
-                site_code,
+                na_target_site if used_na_progress_target else site_code,
                 self.config.account_suffix_by_site,
             ):
                 continue
@@ -1032,6 +1150,10 @@ class FeishuBitableClient:
                 continue
             country_value = _scalar_text(fields.get(field_map["country"]))
             eu_options = _multi_strings(fields.get(field_map["country_eu"]))
+
+            if used_na_progress_target:
+                matches.append((record_id, requested_option or site_code))
+                continue
 
             if used_eu_progress_target:
                 if requested_option:
@@ -1094,6 +1216,8 @@ class FeishuBitableClient:
             (
                 "unique existing UK Feishu record selected as the shared EU progress target"
                 if used_eu_progress_target
+                else "unique existing US Feishu record selected as the shared NA progress target"
+                if used_na_progress_target
                 else "unique existing Feishu record matched by account, brand and explicit country option"
                 if used_country_fallback
                 else "unique existing Feishu record matched"
@@ -1175,6 +1299,9 @@ def ensure_submission_records(
     uk_sku: str = "",
     uk_title: str = "",
     uk_content: str = "",
+    us_sku: str = "",
+    us_title: str = "",
+    us_content: str = "",
     client: FeishuBitableClient | None = None,
 ) -> dict[str, Any]:
     """Idempotently create missing submission rows behind the Feishu write gate."""
@@ -1200,6 +1327,9 @@ def ensure_submission_records(
             uk_sku=uk_sku,
             uk_title=uk_title,
             uk_content=uk_content,
+            us_sku=us_sku,
+            us_title=us_title,
+            us_content=us_content,
             dry_run=not config.write_enabled,
         )
     except (FeishuConfigurationError, FeishuApiError, ValueError) as exc:

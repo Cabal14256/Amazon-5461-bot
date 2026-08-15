@@ -37,6 +37,8 @@ STATE_ACTIONS = {
     "5461_triggered": ("legacy", "click_apply_to_sell", "form_loading"),
     "gtin_exemption": ("legacy", "click_apply_to_sell", "form_loading"),
     "connect_brand": ("legacy", "connect_brand", "form_loading"),
+    "application_type_selection": ("legacy", "select_create_new_asins", "form_loading"),
+    "application_sell_only": ("stop", "human_review_sell_products_only", None),
     "already_approved": ("done", None, "done"),
     "declined_case_shown": ("legacy", "handle_declined", "form_loading"),
     # 5461 form flow
@@ -62,6 +64,9 @@ PAGE_TYPE_TO_STATE = {
     "GTIN_EXEMPTION": "gtin_exemption",
     "AUTH_REQUIRED": "5461_triggered",
     "NEEDS_APPROVAL_NEW_UI": "5461_triggered",
+    "APPLICATION_TYPE_SELECTION": "application_type_selection",
+    "APPLICATION_SELL_ONLY": "application_sell_only",
+    "APPLICATION_TYPE_UNKNOWN": "unknown",
     # 5461_FORM_OPEN 只表示右侧 panel 壳子打开；字段未加载时仍应停在 form_loading，
     # 由 _match_state() 用 _probe_5461_form() 动态判定，避免空壳 panel 被误判为可填表。
     "5461_FORM": "form_ready",
@@ -516,6 +521,7 @@ class StateLoopExecutor:
                 evidence=evidence,
                 step=step,
                 signal_path=signal_path,
+                db_path=str(self.project_root / "runtime" / "state" / "ledger.db"),
             )
             print(f"[SIGNAL] Codex diagnosis pending: {signal_path} ({signal['signal_id']})")
         except Exception as exc:

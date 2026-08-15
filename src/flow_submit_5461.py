@@ -1,18 +1,37 @@
 import random
 import re
-import time
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
-from .evidence import build_evidence_dir, write_text, capture_evidence_safe, EVIDENCE_NODES
+from typing import Optional
+
+from playwright.sync_api import Page, sync_playwright
+
+from .amazon_error_handler import ensure_page_ready
+from .application_type_selection import classify_application_type_text
 from .email_resolver import clean_email, get_autofill_email_from_page
-from .amazon_error_handler import (
-    is_amazon_server_error_page,
-    recover_from_server_error,
-    ensure_page_ready,
-)
-from playwright.sync_api import sync_playwright, Page
+from .evidence import EVIDENCE_NODES, build_evidence_dir, capture_evidence_safe, write_text
 from .human_interaction import human_click, human_type
+
+
+_APPLICATION_REQUIRED_RE = re.compile(r"applications?\s*required", re.IGNORECASE)
+_RESTRICTION_COUNT_RE = re.compile(r"\b\d+\s*restrictions?\b", re.IGNORECASE)
+
+
+def has_application_required_entry_text(text: str) -> bool:
+    """Recognize the new Add Product approval entry for any item count.
+
+    Amazon renders both singular and plural variants (for example
+    ``1 application required`` and ``2 applications required``).  Some Katal
+    snapshots concatenate adjacent nodes, so whitespace around the count is
+    intentionally optional.
+    """
+    normalized = " ".join(str(text or "").split())
+    if _APPLICATION_REQUIRED_RE.search(normalized):
+        return True
+    return bool(_RESTRICTION_COUNT_RE.search(normalized) and re.search(r"\bview\b", normalized, re.I))
+
 
 def _async_screenshot(page, path: str, full_page: bool = False, timeout: int = 10000) -> None:
     """
@@ -478,6 +497,7 @@ def submit_5461(
     upload_files: list,
     evidence_root: str,
     require_human_confirm: bool = True,
+    keep_browser_open: bool = False,
 ):
     """
     提交 5461 表单
@@ -493,6 +513,7 @@ def submit_5461(
         upload_files: 要上传的文件列表
         evidence_root: 证据保存根目录
         require_human_confirm: 是否需要人工确认后再提交
+        keep_browser_open: 完成后是否保留已连接的浏览器
     
     Returns:
         结果字典
@@ -503,6 +524,7 @@ def submit_5461(
     result = {
         "submit_result": "failed",
         "case_id": None,
+        "submission_started_at": datetime.now().isoformat(),
         "note": "",
         "evidence_files": [],
         "steps": []
@@ -715,6 +737,29 @@ def check_page_state(page) -> dict:
         'has_5461_form': False,
         'brand_blocked': False,
     }
+
+    def classify_visible_panel_without_fields(panel_text=None):
+        application_type = classify_application_type_text(panel_text if panel_text is not None else page_text)
+        state['application_type'] = application_type
+        application_status = application_type.get('status')
+        if application_status == 'create_new_asins_available':
+            state['page_type'] = 'APPLICATION_TYPE_SELECTION'
+            state['needs_auth'] = True
+            return state
+        if application_status == 'sell_products_only':
+            state['page_type'] = 'APPLICATION_SELL_ONLY'
+            state['needs_auth'] = True
+            state['requires_human_review'] = True
+            return state
+        if application_status == 'unknown_application_options':
+            state['page_type'] = 'APPLICATION_TYPE_UNKNOWN'
+            state['needs_auth'] = True
+            state['requires_human_review'] = True
+            return state
+        state['page_type'] = '5461_PANEL_SHELL'
+        state['has_5461_form'] = False
+        state['panel_shell'] = True
+        return state
     
     # 检查自动批准弹窗（英国站点特有）
     auto_approval_modal = page.evaluate('''() => {
@@ -808,14 +853,28 @@ def check_page_state(page) -> dict:
         # 方法1: 通过 JavaScript 检查（更可靠，优先使用）
         panel_check = page.evaluate('''
             () => {
-                const panel = document.querySelector('kat-panel-wrapper[data-testid="kat-panel-wrapper-QualificationWidget"]');
+                let panel = document.querySelector('kat-panel-wrapper[data-testid="kat-panel-wrapper-QualificationWidget"]');
+                if (!panel) {
+                    for (const wrapper of document.querySelectorAll('kat-panel-wrapper')) {
+                        const text = (wrapper.innerText || wrapper.textContent || '').toLowerCase();
+                        const style = window.getComputedStyle(wrapper);
+                        const visible = wrapper.getAttribute('panel-visible') === 'true' ||
+                            (style.display !== 'none' && style.visibility !== 'hidden' &&
+                             wrapper.offsetWidth > 0 && wrapper.offsetHeight > 0);
+                        if (visible && (text.includes('apply to sell') || text.includes('application to'))) {
+                            panel = wrapper;
+                            break;
+                        }
+                    }
+                }
                 if (panel) {
                     return {
                         found: true,
                         visible: panel.getAttribute('panel-visible') === 'true',
                         display: panel.style.display !== 'none',
                         width: panel.offsetWidth,
-                        height: panel.offsetHeight
+                        height: panel.offsetHeight,
+                        text: panel.innerText || panel.textContent || ''
                     };
                 }
                 return { found: false };
@@ -828,11 +887,9 @@ def check_page_state(page) -> dict:
                 state['page_type'] = '5461_FORM_OPEN'
                 state['has_5461_form'] = True
                 return state
-            state['page_type'] = '5461_PANEL_SHELL'
-            state['has_5461_form'] = False
-            state['panel_shell'] = True
-            print("[DEBUG] 检测到 5461 panel shell，但真实字段/上传控件未加载；不判定为表单打开")
-            return state
+            classified = classify_visible_panel_without_fields(panel_check.get('text'))
+            print(f"[DEBUG] 5461 panel 无真实字段，分类为 {classified['page_type']}")
+            return classified
         
         # 方法2: 通过 Playwright locator 检查
         panel = page.locator('kat-panel-wrapper[data-testid="kat-panel-wrapper-QualificationWidget"]').first
@@ -843,11 +900,13 @@ def check_page_state(page) -> dict:
                     state['page_type'] = '5461_FORM_OPEN'
                     state['has_5461_form'] = True
                     return state
-                state['page_type'] = '5461_PANEL_SHELL'
-                state['has_5461_form'] = False
-                state['panel_shell'] = True
-                print("[DEBUG] locator 检测到 5461 panel shell，但真实字段/上传控件未加载")
-                return state
+                try:
+                    locator_panel_text = panel.text_content(timeout=2000) or ''
+                except Exception:
+                    locator_panel_text = page_text
+                classified = classify_visible_panel_without_fields(locator_panel_text)
+                print(f"[DEBUG] locator 检测到无字段 panel，分类为 {classified['page_type']}")
+                return classified
     except Exception as e:
         print(f"[DEBUG] 检查 5461 弹窗失败: {e}")
         pass
@@ -876,7 +935,7 @@ def check_page_state(page) -> dict:
     # 品牌选择弹窗的特征：有 "select brand" 文本 + 页面上有多个品牌描述
     if has_select_brand_text or has_brand_warning:
         # 检查页面文本中是否有多个品牌选项的特征（品牌名 + 描述）
-        # 真正的品牌选择弹窗会有类似 "JZGA brand offering..." 或 "JZGManufacturer of..." 的文本
+        # 真正的品牌选择弹窗会有类似 "DEMO_JADEA brand offering..." 或 "DEMO_JADEManufacturer of..." 的文本
         has_brand_descriptions = False
         # 检查是否有品牌描述模式（品牌名后跟描述性文本）
         brand_desc_patterns = ['brand offering', 'manufacturer of', 'seller of', 'specializes in']
@@ -936,14 +995,10 @@ def check_page_state(page) -> dict:
     
     # 检查是否在新UI的 Product Identity 页面（只有在没有弹窗的情况下）
     if 'interactive/listing/workflow/create' in current_url.lower():
-        # ★ 2026-07-15: 新UI把 "Apply to sell" 替换为
-        # "1 restriction / 1 application required" + kat-link "View"
+        # ★ 新UI把 "Apply to sell" 替换为
+        # "N restriction(s) / N application(s) required" + kat-link "View"
         # 这种情况必须识别为 NEEDS_APPROVAL_NEW_UI，否则阶段2跳过授权步骤
-        has_application_required = (
-            '1 application required' in page_text
-            or 'application required' in page_text_lower
-            or ('1 restriction' in page_text and 'view' in page_text_lower)
-        )
+        has_application_required = has_application_required_entry_text(page_text)
         if has_application_required:
             state['page_type'] = 'NEEDS_APPROVAL_NEW_UI'
             state['needs_auth'] = True
@@ -975,6 +1030,86 @@ def check_page_state(page) -> dict:
         state['has_5461_form'] = True
     
     return state
+
+
+def capture_failure_page_evidence(page) -> dict:
+    """Capture a bounded, read-only summary before Dashboard navigation.
+
+    Screenshots remain private. This summary gives incident triage enough
+    state, visible text, and selector-probe context to distinguish a state
+    recognizer defect from a changed workflow or a genuinely missing control.
+    """
+    evidence = {
+        "url": str(getattr(page, "url", "") or ""),
+        "visible_text": "",
+        "recognized_state": {},
+        "selector_probes": {},
+    }
+    errors = []
+    try:
+        evidence["visible_text"] = str(page.inner_text("body") or "")[:8192]
+    except Exception as exc:
+        errors.append(f"visible_text: {exc}")
+    try:
+        state = check_page_state(page)
+        evidence["recognized_state"] = {
+            key: state.get(key)
+            for key in (
+                "page_type",
+                "needs_auth",
+                "has_5461_form",
+                "needs_brand_selection",
+            )
+        }
+    except Exception as exc:
+        errors.append(f"recognized_state: {exc}")
+    try:
+        evidence["selector_probes"] = page.evaluate(
+            r"""() => {
+                const deepRoots = [document];
+                for (let i = 0; i < deepRoots.length; i++) {
+                    for (const node of deepRoots[i].querySelectorAll('*')) {
+                        if (node.shadowRoot) deepRoots.push(node.shadowRoot);
+                    }
+                }
+                const deepQuery = (selector) => deepRoots.flatMap(
+                    root => Array.from(root.querySelectorAll(selector))
+                );
+                const normalizedText = node => (
+                    node.innerText || node.textContent || node.getAttribute?.('label') || ''
+                ).replace(/\s+/g, ' ').trim();
+                const controls = deepQuery('button, kat-button, a, kat-link, [role="button"]');
+                const approvalControls = controls.filter(node => {
+                    const text = normalizedText(node).toLowerCase();
+                    return text === 'view' || text.includes('apply to sell') ||
+                        /applications?\s*required/.test(text);
+                });
+                return {
+                    approval_control_count: approvalControls.length,
+                    approval_control_texts: approvalControls.slice(0, 10).map(
+                        node => normalizedText(node).slice(0, 160)
+                    ),
+                    visible_panel_count: deepQuery(
+                        'kat-panel-wrapper[panel-visible="true"]'
+                    ).length,
+                    form_field_count: deepQuery(
+                        'kat-input[id*="product_title"], ' +
+                        'kat-input#question-cat_auth_mo_question_string_id_product_title, ' +
+                        'input[id*="document_upload"][id*="document_input"]'
+                    ).length,
+                    restriction_entry_count: deepQuery('body, kat-panel-wrapper').filter(node =>
+                        /\b\d+\s*restrictions?\b/i.test(normalizedText(node)) &&
+                        (/applications?\s*required/i.test(normalizedText(node)) ||
+                         /\bview\b/i.test(normalizedText(node)))
+                    ).length,
+                };
+            }"""
+        ) or {}
+    except Exception as exc:
+        errors.append(f"selector_probes: {exc}")
+    if errors:
+        evidence["capture_errors"] = errors
+    return evidence
 
 
 def handle_brand_selection(page, brand_name: str, brand_keywords: list = None) -> bool:
@@ -1334,7 +1469,12 @@ def handle_brand_selection(page, brand_name: str, brand_keywords: list = None) -
                 if matched_index is not None:
                     break
         
-        # 如果关键词没匹配到，尝试匹配品牌名
+        # 配置了品牌专属识别文本时，它是权威匹配条件；未命中就拒绝猜测。
+        if brand_keywords and matched_index is None:
+            print("[品牌选择] 品牌专属识别文本未命中，拒绝按品牌名或首个选项回退")
+            return False
+
+        # 未配置专属识别文本时，尝试匹配品牌名
         if matched_index is None:
             for opt in options:
                 combined = opt.get('combined', '').lower()
@@ -1531,10 +1671,11 @@ def connect_brand_in_5461_panel(page, brand_name: str, keywords: list = None) ->
       3. 在 brex-widget 中按关键词选正确 radio
       4. 点击 kat-button[data-testid="connect-brand-button"]
     """
-    kws = [k.lower() for k in (keywords or [])] + [
+    default_kws = [
         'screen protector', 'phone case', 'protective', '手机屏幕保护膜',
         'screen', 'mobile', 'cellphone', 'smartphone',
     ]
+    kws = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()] or default_kws
     print(f"[ConnectBrand] 关键词: {kws}")
 
     def _select_from_brex_widget():
@@ -1559,14 +1700,24 @@ def connect_brand_in_5461_panel(page, brand_name: str, keywords: list = None) ->
         if not opts:
             return {'found': True, 'selected': False, 'brand_text': '', 'note': 'brex-widget 无品牌选项'}
 
-        best_idx = 0
+        best_idx = None
         for o in opts:
             if any(kw in o['text'].lower() for kw in kws):
                 best_idx = o['index']
                 print(f"[ConnectBrand] 关键词匹配 [{best_idx}]: {o['text'][:80]}")
                 break
-        else:
-            print(f"[ConnectBrand] 未匹配关键词，默认选第一个: {opts[0]['text'][:80]}")
+
+        if best_idx is None and keywords:
+            print("[ConnectBrand] 品牌专属识别文本未命中，拒绝选择首个选项")
+            return {
+                'found': True,
+                'selected': False,
+                'brand_text': '',
+                'note': '品牌专属识别文本未命中，拒绝猜测',
+            }
+        if best_idx is None:
+            best_idx = 0
+            print(f"[ConnectBrand] 未匹配默认关键词，选择第一个: {opts[0]['text'][:80]}")
 
         best_text = opts[best_idx]['text']
 
@@ -2112,64 +2263,26 @@ def fill_5461_form(page, brand_name: str, statement_text: str, upload_files: lis
         'submit_button': 'kat-button#submit_button',
     }
     
-    # 0. 检查是否需要点击选项（新UI弹窗有两个选项）
+    # 0. Defensive guard for direct callers.  The normal entry flow resolves
+    # this chooser before calling fill_5461_form, but never keep the historical
+    # broad "Application to..." click here: it could select sell-products.
     print("  - 检查是否需要选择申请类型...")
-    try:
-        # 查找 "Application to create new ASINs" 选项
-        options = page.evaluate('''() => {
-            const results = [];
-            // 查找所有包含 "Application to" 的元素
-            const elements = document.querySelectorAll('kat-box, div, span, a, button');
-            for (const el of elements) {
-                const text = el.textContent || '';
-                if (text.includes('Application to create new ASINs') || text.includes('Application to sell')) {
-                    results.push({
-                        text: text.trim(),
-                        tag: el.tagName,
-                        clickable: el.onclick !== null || el.tagName === 'A' || el.getAttribute('role') === 'button'
-                    });
-                }
-            }
-            return results;
-        }''')
-        
-        if options and len(options) > 0:
-            print(f"    找到 {len(options)} 个申请选项")
-            # 点击 "Application to create new ASINs"
-            # 方法1: 使用 Playwright locator
-            try:
-                asin_option = page.locator('text=Application to create new ASINs').first
-                if asin_option.count() > 0:
-                    asin_option.click(force=True)
-                    print("    已点击 'Application to create new ASINs' (Playwright)")
-                else:
-                    # 方法2: 使用 JavaScript
-                    click_result = page.evaluate('''() => {
-                        const elements = document.querySelectorAll('kat-box, div, span, a, button');
-                        for (const el of elements) {
-                            const text = el.textContent || '';
-                            if (text.includes('Application to create new ASINs')) {
-                                // 尝试点击元素本身或其父元素
-                                el.click();
-                                if (el.parentElement) el.parentElement.click();
-                                return { clicked: true, text: text.trim() };
-                            }
-                        }
-                        return { clicked: false };
-                    }''')
-                    print(f"    点击结果: {click_result}")
-            except Exception as e:
-                print(f"    点击失败: {e}")
-            # 等待表单字段实际出现，最多 8s，早到早退
-            _form_ready = False
-            try:
-                _form_ready = wait_for_5461_form_fields(page, timeout_sec=8, interval_sec=1)
-            except Exception:
-                pass
-            if not _form_ready:
-                time.sleep(2)  # 兜底稳定期
-    except Exception as e:
-        print(f"    检查选项失败: {e}")
+    from .application_type_selection import probe_application_type_options
+    application_probe = probe_application_type_options(page)
+    application_status = application_probe.get('status')
+    if application_status == 'create_new_asins_available':
+        from .form_filler import KatalFormFiller
+        application_filler = KatalFormFiller(page)
+        application_filler.brand_name = brand_name
+        application_result = application_filler.select_create_new_asins_application()
+        if not application_result.get('fields_ready'):
+            raise RuntimeError(
+                f"application_type_selection_failed:{application_result.get('status')}"
+            )
+    elif application_status in {
+        'sell_products_only', 'unknown_application_options', 'existing_application',
+    }:
+        raise RuntimeError(f"application_type_requires_human_review:{application_status}")
     
     # 1. 填写 Product title（从声明文案中提取 Item name，回退到品牌名+Screen Protector）
     print("  - 填写 Product title...")
@@ -2713,12 +2826,17 @@ def submit_5461_from_add_product(
     keep_browser_open: bool = False,  # 批量模式下保持浏览器开启
     page: Optional[Page] = None,  # 复用已有页面实例
     skip_market_switch: bool = False,  # 跳过市场切换（已在正确市场时使用）
+    no_submit: bool = False,  # dry-run：真实走流程到提交前一步，绝不点击提交
     skip_add_product_goto: bool = False,  # 跳过 goto(add_product_url)，页面已就位时使用
 ):
     """
     从 Add Product 页面开始，自动流转到 5461 表单并提交
     
     修复：添加页面状态检测，处理品牌已有权限的情况
+
+    no_submit=True（dry-run 语义）：真实走完市场切换、Add Product、授权面板、
+    5461 表单填写、文件上传与截图留证，但在任何提交按钮点击前短路返回，
+    跳过 Case ID 轮询，返回 submit_result="dry_run"。
     """
     from .form_filler import KatalFormFiller
     
@@ -2762,6 +2880,20 @@ def submit_5461_from_add_product(
                 print(f"[dialog] 忽略已处理/已关闭的 dialog: {e}")
         page.on("dialog", _safe_dismiss_dialog)
         
+        def _dry_run_no_submit_return(phase, path_desc):
+            """no_submit(dry-run) 统一短路：留证截图、记录 step、返回 dry_run，绝不点击提交。"""
+            result["steps"].append({"phase": phase, "action": "click_submit", "status": "skipped_no_submit"})
+            try:
+                shot_ns = evidence_dir / "no_submit_before_submit.png"
+                _async_screenshot(page, str(shot_ns), full_page=True, timeout=10000)
+                result["evidence_files"].append(str(shot_ns))
+            except Exception as _shot_err:
+                print(f"[警告] no_submit 截图失败: {_shot_err}")
+            result["submit_result"] = "dry_run"
+            result["note"] = f"dry-run：已走到提交前一步，未点击提交（{path_desc}）"
+            print(f"[DRY-RUN] no_submit=True：{path_desc}，跳过点击提交与 Case ID 轮询")
+            return result
+
         try:
             # 阶段 0: 切换目标国家市场
             if skip_market_switch:
@@ -2859,7 +2991,7 @@ def submit_5461_from_add_product(
                     pass
 
                 # [2026-05-18] 检测 Amazon 服务端错误页面并自动恢复
-                # 经验: HOMEMO 成功后，WILLONE/JZG/MP-MALL 全部遇到服务端错误，导致连锁失败
+                # 经验: DEMO_HOME 成功后，DEMO_WILL/DEMO_JADE/MP-MALL 全部遇到服务端错误，导致连锁失败
                 print("[阶段 1/3] 检查页面状态...")
                 recovery_result = ensure_page_ready(
                     page=page,
@@ -2884,6 +3016,7 @@ def submit_5461_from_add_product(
                     print(f"[阶段 1/3] ✅ 从服务端错误页面恢复成功（重试 {recovery_result['retries']} 次）")
             
             filler = KatalFormFiller(page)
+            filler.brand_name = brand_name
             
             # 从声明文案中提取 Item Name
             item_name = extract_item_name_from_statement(statement_text)
@@ -3199,6 +3332,8 @@ def submit_5461_from_add_product(
                                 return result
                         form_result = fill_5461_form(page, brand_name, statement_text, upload_files, account_email)
                         result["steps"].append({"phase": 1.5, "action": "fill_5461_after_connect_brand", "details": form_result})
+                        if no_submit:
+                            return _dry_run_no_submit_return(1.5, "Connect brand 早路径 阶段1.5")
                         print("[阶段 1.5] 点击提交...")
                         click_katal_button(page, 'kat-button#submit_button')
                         # 与阶段3保持一致：轮询等待 Case ID，最多90秒
@@ -3366,6 +3501,8 @@ def submit_5461_from_add_product(
                     """() => {
                         const body = (document.body.innerText || '').toLowerCase();
                         return body.includes('apply to sell') ||
+                               body.includes('application required') ||
+                               body.includes('applications required') ||
                                body.includes('you need approval') ||
                                body.includes('brand authorisation required') ||
                                document.querySelector('kat-panel-wrapper[panel-visible="true"]') !== null;
@@ -3387,8 +3524,10 @@ def submit_5461_from_add_product(
                 for (const lnk of katLinks) {
                     const text = (lnk.textContent || lnk.getAttribute('label') || '').trim().toLowerCase();
                     if (text === 'view') {
-                        const bodyText = document.body.innerText;
-                        if (bodyText.includes('application required') || bodyText.includes('1 restriction')) {
+                        const bodyText = (document.body.innerText || '').toLowerCase();
+                        if (bodyText.includes('application required') ||
+                            bodyText.includes('applications required') ||
+                            /[0-9]+\\s*restrictions?/.test(bodyText)) {
                             return { found: true, text: 'kat-link-view-application-required' };
                         }
                     }
@@ -3398,7 +3537,7 @@ def submit_5461_from_add_product(
                 if (bodyText.includes('apply to sell')) {
                     return { found: true, text: 'found_in_body' };
                 }
-                if (bodyText.includes('application required') || bodyText.includes('1 application')) {
+                if (bodyText.includes('application required') || bodyText.includes('applications required')) {
                     return { found: true, text: 'application_required_in_body' };
                 }
                 return { found: false };
@@ -3406,7 +3545,7 @@ def submit_5461_from_add_product(
             print(f"[阶段 2/3] Apply to sell 按钮检测: {has_apply_button}")
 
             # ★ 阶段1.8 直接落到 BRAND_SELECTION（跳过了 Description 页）
-            # 例：JZG 在 UK 触发 ConnectBrand 弹窗，Continue 后直接出现 "Select brand" 按钮
+            # 例：DEMO_JADE 在 UK 触发 ConnectBrand 弹窗，Continue 后直接出现 "Select brand" 按钮
             # 此时不需要经过 Product Identity retrigger，直接走品牌选择流程
             if not state.get('has_5461_form') and state.get('page_type') == 'BRAND_SELECTION':
                 print("\n[阶段 2/3] 阶段1.8后直接检测到 BRAND_SELECTION，跳过 Apply to sell，直接走品牌选择流程...")
@@ -3493,6 +3632,7 @@ def submit_5461_from_add_product(
                         # 重新填写完整表单
                         print("[阶段 2/3] 重新填写完整表单...")
                         filler = KatalFormFiller(page)
+                        filler.brand_name = brand_name
                         fill_success = filler.fill_product_identity_form(
                             brand_name=brand_name,
                             item_name=item_name,
@@ -3553,7 +3693,28 @@ def submit_5461_from_add_product(
                     else:
                         print("[阶段 2/3] click_apply_to_sell 未拿到真实 5461 字段；停止本品牌，避免把半加载 panel 当成弹框")
                         result["submit_result"] = "failed"
-                        result["note"] = "Apply to sell 后未加载真实 5461 字段/上传控件（可能 410001/429 或 panel shell 半加载）"
+                        application_type = getattr(filler, 'application_type_result', None) or {}
+                        application_status = application_type.get('status')
+                        if application_status == 'sell_products_only':
+                            result["note"] = (
+                                "semantic_control_missing: Apply to sell 面板仅提供 sell products 入口；"
+                                "未自动点击，需人工确认创建新 ASIN 的申请路径"
+                            )
+                        elif application_status in {
+                            'unknown_application_options', 'target_brand_missing',
+                            'create_card_click_failed',
+                        }:
+                            result["note"] = (
+                                f"state_unknown: Apply to sell 申请类型面板无法安全处理 "
+                                f"({application_status})"
+                            )
+                        elif application_status == 'create_card_selected_form_not_ready':
+                            result["note"] = (
+                                "flow_loop_exhausted: 已选择 create new ASINs 入口，"
+                                "但真实 5461 字段未加载"
+                            )
+                        else:
+                            result["note"] = "Apply to sell 后未加载真实 5461 字段/上传控件（panel shell 半加载）"
                         return result
                 
                 # Under Review: panel 内已有 Case ID，无需填表
@@ -4002,6 +4163,8 @@ def submit_5461_from_add_product(
                             """() => {
                                 const body = (document.body.innerText || '').toLowerCase();
                                 return body.includes('apply to sell') ||
+                                       body.includes('application required') ||
+                                       body.includes('applications required') ||
                                        body.includes('you need approval') ||
                                        body.includes('brand authorisation required') ||
                                        document.querySelector('kat-panel-wrapper[panel-visible="true"]') !== null;
@@ -4034,8 +4197,11 @@ def submit_5461_from_add_product(
                         const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
                         const all = Array.from(document.querySelectorAll('kat-button, button, a'));
                         const btn = all.find(b => ((b.getAttribute('label') || b.textContent || b.innerText || '').toLowerCase()).includes('apply to sell'));
+                        const hasApplicationRequired = bodyText.includes('application required') ||
+                            bodyText.includes('applications required');
+                        const hasRestrictionEntry = /[0-9]+\\s*restrictions?/.test(bodyText) && bodyText.includes('view');
                         return {
-                            found: !!btn || bodyText.includes('apply to sell'),
+                            found: !!btn || bodyText.includes('apply to sell') || hasApplicationRequired || hasRestrictionEntry,
                             hasApprovalText: bodyText.includes('you need approval to list this product') || bodyText.includes('brand authorisation required') || bodyText.includes('brand authorization required'),
                             buttonText: btn ? ((btn.getAttribute('label') || btn.textContent || btn.innerText || '').trim()) : ''
                         };
@@ -4103,6 +4269,8 @@ def submit_5461_from_add_product(
                                         return result
                                 form_result_bs = fill_5461_form(page, brand_name, statement_text, upload_files, account_email)
                                 result["steps"].append({"phase": 2, "action": "fill_5461_after_brand_selection", "details": form_result_bs})
+                                if no_submit:
+                                    return _dry_run_no_submit_return(2, "Description→BRAND_SELECTION 路径 阶段2/3")
                                 print("[阶段 2/3] 点击提交...")
                                 click_katal_button(page, 'kat-button#submit_button')
                                 print("[阶段 2/3] 等待 Case ID 出现（最多90秒）...")
@@ -4154,6 +4322,8 @@ def submit_5461_from_add_product(
                                         return result
                                 form_result_dr = fill_5461_form(page, brand_name, statement_text, upload_files, account_email)
                                 result["steps"].append({"phase": 2, "action": "fill_5461_after_declined_recovery", "details": form_result_dr})
+                                if no_submit:
+                                    return _dry_run_no_submit_return(2, "Description→Declined recovery 路径 阶段2/3")
                                 print("[阶段 2/3] 点击提交...")
                                 click_katal_button(page, 'kat-button#submit_button')
                                 print("[阶段 2/3] 等待 Case ID 出现（最多90秒）...")
@@ -4251,7 +4421,13 @@ def submit_5461_from_add_product(
                                     return result
                 else:
                     result["submit_result"] = "failed"
-                    result["note"] = "无法进入5461表单"
+                    if state.get('page_type') in ('PRODUCT_IDENTITY', 'PRODUCT_IDENTITY_NEW_UI'):
+                        result["note"] = (
+                            "semantic_control_missing: Product Identity 页面未识别到授权申请入口，"
+                            "无法进入5461表单"
+                        )
+                    else:
+                        result["note"] = "无法进入5461表单"
                     return result
             
             # [阶段 2] 证据采集：Connect brand / 5461 触发
@@ -4263,7 +4439,7 @@ def submit_5461_from_add_product(
             # 阶段 3: 填写 5461 表单
             print("\n[阶段 3/3] 填写 5461 表单...")
 
-            # 先检查 5461 面板内是否有 "Connect brand" 覆盖层（JZG/MP-MALL 等多同名品牌）
+            # 先检查 5461 面板内是否有 "Connect brand" 覆盖层（DEMO_JADE/MP-MALL 等多同名品牌）
             connect_keywords = None
             try:
                 import json as _json
@@ -4340,6 +4516,12 @@ def submit_5461_from_add_product(
             except Exception as e:
                 print(f"[警告] 截图失败: {e}")
             
+            # dry-run(no_submit)：表单已填写、03_before_submit.png 已留证，在点击提交前短路返回。
+            # 注意：下方 429 重试块（含 JS 重新提交 document.querySelector('kat-button#submit_button')）
+            # 在 no_submit 下不可达——此处已 return，永远不会执行到任何提交点击，无需额外守卫。
+            if no_submit:
+                return _dry_run_no_submit_return(3, "主路径 阶段3/3，提交按钮点击前")
+
             # 人工确认
             if require_human_confirm:
                 import sys
@@ -4572,6 +4754,9 @@ def submit_5461_from_add_product(
             # Save final screenshot first, then run the dashboard check while the
             # Seller Central tab is still alive. Dashboard check is read-only and
             # only triggers for uncertain/failed submissions.
+            pre_dashboard_status = result.get("submit_result", "failed")
+            if pre_dashboard_status in ("failed", "partial", "error", "uncertain"):
+                result["failure_page_evidence"] = capture_failure_page_evidence(page)
             try:
                 final_shot = evidence_dir / "final_state.png"
                 page.screenshot(path=str(final_shot), full_page=False, timeout=10000)
@@ -4591,14 +4776,27 @@ def submit_5461_from_add_product(
                 needs_dashboard_check = any(k in note_l for k in ["410001", "429", "case id", "未提取", "未检测到成功", "半加载"])
 
             if needs_dashboard_check:
+                dashboard_page = page
+                close_dashboard_page = False
                 try:
                     from .case_dashboard_checker import check_case_dashboard_for_brand
+
+                    # The post-submit Add Product tab can abort navigation while
+                    # requests are still settling. Use a fresh tab in the same
+                    # signed-in context so View Selling Applications is not
+                    # analysed from stale Add Product content.
+                    try:
+                        dashboard_page = page.context.new_page()
+                        close_dashboard_page = True
+                    except Exception:
+                        dashboard_page = page
                     dash = check_case_dashboard_for_brand(
-                        page=page,
+                        page=dashboard_page,
                         account_id=account_id,
                         marketplace=marketplace,
                         brand_name=brand_name,
                         evidence_dir=evidence_dir,
+                        submitted_at=result.get("submission_started_at"),
                     )
                     result["dashboard_check"] = dash
                     for f in dash.get("evidence_files", []):
@@ -4627,6 +4825,12 @@ def submit_5461_from_add_product(
                 except Exception as dash_err:
                     print(f"[DashboardCheck] 集成检查失败: {dash_err}")
                     result["dashboard_check"] = {"checked": False, "status": "error", "error": str(dash_err)}
+                finally:
+                    if close_dashboard_page:
+                        try:
+                            dashboard_page.close()
+                        except Exception:
+                            pass
 
             # 提交成功且提取到 Case ID 时关闭标签页节省内存
             # 没有 Case ID 时保留标签页供人工核对
@@ -4658,6 +4862,8 @@ def submit_5461_from_add_product(
                 print("[清理] 标记为成功但未提取到 Case ID，保留标签页供人工核对...")
             elif submit_status == "under_review":
                 print(f"[清理] Under Review（Case ID: {result.get('case_id', '?')}），无需重新申请")
+            elif submit_status == "dry_run":
+                print("[清理] dry-run：未点击提交，标签页交由调用方（批处理器）关闭")
             else:
                 print(f"[清理] 执行失败（{submit_status}），保留标签页用于调试...")
             

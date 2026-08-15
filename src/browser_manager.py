@@ -7,6 +7,7 @@ Browser Manager - 统一的浏览器连接管理模块
 import json
 import sys
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -198,6 +199,35 @@ class BrowserManager:
         
         page = self._context.new_page()
         return page
+
+    def close_tabs_except_hosts(
+        self,
+        allowed_hosts: Iterable[str],
+        kept_pages: Iterable[Any] | None = None,
+    ) -> dict[str, int]:
+        """Close tabs except exact allowed hosts and explicitly retained pages."""
+        if not self._context:
+            raise RuntimeError("浏览器未连接")
+
+        allowed = {str(host or "").strip().casefold() for host in allowed_hosts if host}
+        kept_page_ids = {id(page) for page in (kept_pages or ())}
+        closed = 0
+        kept = 0
+        failed = 0
+        for page in list(self._context.pages):
+            try:
+                host = (urlsplit(str(getattr(page, "url", "") or "")).hostname or "").casefold()
+                if id(page) in kept_page_ids or host in allowed:
+                    kept += 1
+                    continue
+                page.close()
+                closed += 1
+            except Exception:
+                failed += 1
+        print(
+            f"[BrowserManager] 标签页清理: closed={closed}, kept={kept}, failed={failed}"
+        )
+        return {"closed": closed, "kept": kept, "failed": failed}
     
     def close_tab(self, page: Page | None = None) -> None:
         """关闭标签页"""

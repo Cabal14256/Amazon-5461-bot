@@ -20,7 +20,7 @@ class FakePage:
 
 def test_extract_case_id_allows_uk_case_starting_with_1_near_case_label():
     page = FakePage(
-        "Application to create new ASINs for HOMEMO\n"
+        "Application to create new ASINs for DEMO_HOME\n"
         "Under review - Decision expected by 2 Jun 2026\n"
         "Case ID - 19999999999\n"
     )
@@ -33,8 +33,8 @@ def test_extract_case_id_still_ignores_1_prefixed_phone_without_case_label():
 
 
 def test_dashboard_text_extracts_under_review_case_id_starting_with_1():
-    text = "Application to create new ASINs for HOMEMO Under review Case ID - 19999999999"
-    result = analyze_dashboard_text(text, "HOMEMO")
+    text = "Application to create new ASINs for DEMO_HOME Under review Case ID - 19999999999"
+    result = analyze_dashboard_text(text, "DEMO_HOME")
     assert result["status"] == "under_review"
     assert result["case_id"] == "19999999999"
 
@@ -54,24 +54,24 @@ Case ID
 Application type
 Changed
 Status
-JavoYion
+DEMO_JUNO
 Catalogue Authorisation
 6 Aug 2026
 Draft
-WILLONE
+DEMO_WILL
 Catalogue Authorisation
 6 Aug 2026
 Under review
 Expected decision date: 9 Aug 2026
-uShield
+DEMO_SHIELD
 Catalogue Authorisation
 6 Aug 2026
 Draft
 """
 
-    assert analyze_dashboard_text(text, "JavoYion")["status"] == "draft"
-    assert analyze_dashboard_text(text, "WILLONE")["status"] == "under_review"
-    assert analyze_dashboard_text(text, "uShield")["status"] == "draft"
+    assert analyze_dashboard_text(text, "DEMO_JUNO")["status"] == "draft"
+    assert analyze_dashboard_text(text, "DEMO_WILL")["status"] == "under_review"
+    assert analyze_dashboard_text(text, "DEMO_SHIELD")["status"] == "draft"
 
 
 def test_germany_dashboard_uses_authenticated_shared_eu_portal():
@@ -84,13 +84,56 @@ def test_dashboard_dom_rows_restore_case_id_hidden_in_kat_link_label():
     result = analyze_dashboard_dom_rows(
         [
             {
-                "name": "WILLONE",
-                "text": "WILLONE Catalog Authorization 9 Aug 2026 Under review",
+                "name": "DEMO_WILL",
+                "text": "DEMO_WILL Catalog Authorization 9 Aug 2026 Under review",
                 "case_ids": ["13153167372"],
             }
         ],
-        "WILLONE",
+        "DEMO_WILL",
     )
 
     assert result["status"] == "under_review"
     assert result["case_id"] == "13153167372"
+
+
+def test_dashboard_dom_rows_never_guess_between_same_brand_case_ids():
+    result = analyze_dashboard_dom_rows(
+        [
+            {
+                "name": "DEMO_WILL",
+                "text": "DEMO_WILL Catalog Authorization 10 Aug 2026 Under review",
+                "case_ids": ["13153167372"],
+            },
+            {
+                "name": "DEMO_WILL",
+                "text": "DEMO_WILL Catalog Authorization 8 Aug 2026 Declined",
+                "case_ids": ["13153167371"],
+            },
+        ],
+        "DEMO_WILL",
+    )
+
+    assert result["case_id"] is None
+    assert result["case_ids"] == ["13153167372", "13153167371"]
+
+
+def test_dashboard_dom_rows_can_narrow_same_brand_by_submission_date():
+    result = analyze_dashboard_dom_rows(
+        [
+            {
+                "name": "DEMO_WILL",
+                "text": "DEMO_WILL Catalog Authorization Aug 10, 2026 Under review",
+                "case_ids": ["13153167372"],
+            },
+            {
+                "name": "DEMO_WILL",
+                "text": "DEMO_WILL Catalog Authorization Aug 8, 2026 Declined",
+                "case_ids": ["13153167371"],
+            },
+        ],
+        "DEMO_WILL",
+        submitted_at="2026-08-10 09:30:00",
+    )
+
+    assert result["case_id"] == "13153167372"
+    assert result["case_ids"] == ["13153167372"]

@@ -33,14 +33,50 @@ verification:
 # delay_hours 是待确认的 n；后续只需修改这一项，无需改账号或品牌代码。
 case_followup:
   enabled: true
-  delay_hours: 24.0
-  retry_interval_hours: 6.0
+  delay_hours: 2.0
+  retry_interval_hours: 1.0
   error_retry_interval_hours: 1.0
   max_attempts: 12
   poll_interval_seconds: 60
   connection_circuit_breaker: true
   auto_start_worker: true
+  claim_group_limit: 20
+  max_parallel_profiles: 3
+  parallel_backlog_threshold: 8
+  healthcheck_interval_minutes: 5
   registration_path: "./data/5461申请登记表.xlsx"
+  # Deterministic rules run first. Only answered_unknown replies are sent to
+  # Codex. Transient AI failures are retried once after releasing the worker;
+  # low-confidence/ambiguous results remain manual review.
+  ai_reply_classification:
+    enabled: true
+    auto_apply_min_confidence: 0.85
+    timeout_sec: 300
+    max_attempts: 2
+    retry_interval_minutes: 5
+    forbidden_retry_interval_minutes: 30
+
+# Recover a missing Case ID from the correct regional View Selling
+# Applications page before any business outcome or reapplication decision.
+case_id_recovery:
+  enabled: true
+  initial_delay_minutes: 10
+  retry_interval_minutes: 30
+  max_attempts: 12
+  poll_interval_seconds: 60
+  auto_start_worker: true
+
+# Finite route: only an explicitly authorized campaign may submit. A declined
+# or false-approved Case advances once after 2 hours; technical errors pause.
+reapplication:
+  enabled: true
+  decline_delay_hours: 2.0
+  poll_interval_seconds: 60
+  busy_retry_minutes: 10
+  auto_start_worker: true
+  routes:
+    NA: ["US", "MX"]
+    EU: ["UK", "BE", "DE", "SE", "NL", "FR"]
 
 # Binding and missing-row planning are safe to enable after app/table identifiers
 # are set in .env. Real creates/updates stay disabled until dry-run is reviewed.
@@ -52,6 +88,7 @@ feishu_bitable:
   request_timeout_seconds: 20
   max_candidate_records: 100
   eu_progress_target_option: "英国"
+  na_progress_target_site: "US"
   field_map:
     account: "账号"
     country: "国家"
@@ -81,3 +118,34 @@ feishu_bitable:
     FR: "EU"
     ES: "EU"
     IT: "EU"
+
+# Read-only web console (stage 2). Restrict LAN access with OS firewall rules;
+# see docs/runbooks/runbook-web-console.md.
+web:
+  host: "127.0.0.1"   # set to the LAN IP to expose on the intranet
+  port: 8080
+  session_ttl_hours: 12.0
+  # HTTPS: generate a self-signed cert with scripts/make_dev_cert.py first
+  ssl_cert_path: ""   # e.g. runtime/private/certs/web-console.crt
+  ssl_key_path: ""    # e.g. runtime/private/certs/web-console.key
+  # Informational only; enforcement is done via netsh firewall rules
+  allowed_cidrs:
+    - "192.168.0.0/16"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+  # Stage-4 real submission (single POST /api/jobs/submit, reviewer+).
+  # Real submission is enabled by default but still requires an explicit
+  # account/site/brand scope, preflight and audit.
+  # Set false for an emergency/master shutdown; the endpoint then returns 403.
+  submit_enabled: true
+  # Hard cap on brands per real-submission job (preflight blocker + 422).
+  submit_max_brands: 5
+
+# Stage-5 persisted anomaly detection (repair incident queue).
+incidents:
+  # Master switch: when false, failure signals are not persisted as incidents.
+  enabled: true
+  # Below this confidence an incident requires manual review.
+  manual_review_below: 0.60
+  # At or above this confidence an incident qualifies for auto-triage (stage 6).
+  auto_triage_at_or_above: 0.80

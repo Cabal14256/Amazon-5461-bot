@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "codex-triage-result",
+  "description": "Stage-6 read-only triage classification for one repair incident (blueprint section 16.1 stage A).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "classification",
+    "confidence",
+    "reason",
+    "affected_components",
+    "recommended_scope",
+    "safe_to_generate_patch",
+    "requires_human_review",
+    "missing_evidence"
+  ],
+  "properties": {
+    "classification": {
+      "type": "string",
+      "enum": [
+        "selector_change",
+        "shadow_dom_change",
+        "page_state_change",
+        "workflow_semantic_change",
+        "amazon_platform_error",
+        "account_specific_issue",
+        "insufficient_evidence"
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "reason": {
+      "type": "string"
+    },
+    "affected_components": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": []
+    },
+    "recommended_scope": {
+      "type": "string",
+      "default": ""
+    },
+    "safe_to_generate_patch": {
+      "type": "boolean"
+    },
+    "requires_human_review": {
+      "type": "boolean"
+    },
+    "missing_evidence": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": []
+    }
+  }
+}
