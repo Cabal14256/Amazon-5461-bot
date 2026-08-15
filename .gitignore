@@ -86,3 +86,9 @@ picture/
 !config/*.example.json
 !runtime/**/.gitkeep
 !.gitkeep
+
+# Frontend (Vue 3 + Vite)
+frontend/node_modules/
+frontend/dist/
+!frontend/index.html
+frontend/.ui-check/

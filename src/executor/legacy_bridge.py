@@ -7,7 +7,7 @@ function names, and returns a consistent {ok, result, error} shape.
 
 import time
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
 
 class LegacyBridge:
@@ -23,6 +23,7 @@ class LegacyBridge:
     ACTIONS = {
         "fill_product_identity": "_fill_product_identity",
         "click_apply_to_sell": "_click_apply_to_sell",
+        "select_create_new_asins": "_select_create_new_asins",
         "connect_brand": "_connect_brand",
         "fill_5461_form": "_fill_5461_form",
         "handle_declined": "_handle_declined",
@@ -112,7 +113,7 @@ class LegacyBridge:
 
     def _result_ok(self, action_name: str, result: Any) -> bool:
         """Translate legacy return shapes into a real success boolean."""
-        if action_name == "click_apply_to_sell":
+        if action_name in {"click_apply_to_sell", "select_create_new_asins"}:
             return bool(isinstance(result, dict) and result.get("clicked"))
         if action_name == "fill_product_identity":
             if not isinstance(result, dict):
@@ -186,8 +187,15 @@ class LegacyBridge:
         from ..form_filler import KatalFormFiller
 
         filler = KatalFormFiller(self.page)
+        filler.brand_name = self.brand_data.get("brand_name", "")
         ok = filler.click_apply_to_sell()
         return {"clicked": ok}
+
+    def _select_create_new_asins(self) -> dict:
+        """Select only the exact create-new-ASINs card for the target brand."""
+        filler = self._filler_cls(self.page)
+        filler.brand_name = self.brand_data.get("brand_name", "")
+        return filler.select_create_new_asins_application()
 
     def _connect_brand(self) -> dict:
         """Handle Connect brand popup in 5461 panel."""

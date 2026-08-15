@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# ruff: noqa: E402  (stdout 重包装与 sys.path 引导必须先于后续 import)
 """
 批量 5461 工作流脚本
 支持多账户、多品牌批量执行，并在运行前自动：
@@ -8,12 +8,13 @@
 - 支持 --brands all
 
 用法:
-    python scripts/run_full_5461_batch.py --accounts us_store_530,us_store_529 --brands OUNNE,WILLONE
+    python scripts/run_full_5461_batch.py --accounts us_store_530,us_store_529 --brands DEMO_ORBIT,DEMO_WILL
     python scripts/run_full_5461_batch.py --accounts us_store_543 --brands all
-    python scripts/run_full_5461_batch.py --accounts 550 --brands mocodi,HOMEMO --dry-run
+    python scripts/run_full_5461_batch.py --accounts 550 --brands mocodi,DEMO_HOME --dry-run
 """
-import sys
 import io
+import sys
+
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
 
@@ -22,23 +23,31 @@ import json
 import random
 import re
 import time
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from scripts._flow_cli_common import load_runtime
+from scripts._stop_check import apply_stop_request, stop_file_requested
 from src.adspower_backend import create_adspower_client
+from src.state_files import atomic_write_json, read_json_tolerant
 
 
 def _cdp_connect(playwright_instance, cdp_url: str, timeout: int = 30):
     """connect_over_cdp — direct call (sync_api must run on same thread as playwright start)."""
     return playwright_instance.chromium.connect_over_cdp(cdp_url, timeout=max(1, int(timeout)) * 1000)
-from src.flow_submit_5461 import submit_5461_from_add_product
+from auto_add_account_data import (
+    ensure_account_exists,
+    normalize_account_id,
+    normalize_account_num,
+    normalize_site,
+    sync_brand_pack_for_account,
+)
 from src.email_resolver import resolve_account_email, update_account_email
+from src.flow_submit_5461 import submit_5461_from_add_product
 from src.marketplace_switcher import MARKETPLACE_CONFIG, MarketplaceRegion
-from auto_add_account_data import ensure_account_exists, normalize_account_id, normalize_site, normalize_account_num, sync_brand_pack_for_account
 
 PICTURE_ROOT = project_root / "picture"
 
@@ -67,6 +76,113 @@ def group_items_all_completed(batch: dict, group_key: tuple[str, str | None] | N
         if item.get("account_id") == account_id and item.get("site") == site
     ]
     return bool(group_items) and all(item.get("status") in ("completed", "skipped") for item in group_items)
+
+
+def _load_incidents_config() -> dict:
+    """Read the ``incidents:`` section of config/settings.yaml.
+
+    The batch side deliberately avoids WebSettings; any read failure falls
+    back to enabled=True with default thresholds.
+    """
+    try:
+        from src.config_loader import load_yaml
+        raw = load_yaml(str(project_root / "config" / "settings.yaml")) or {}
+        section = raw.get("incidents") or {}
+        return {
+            "enabled": bool(section.get("enabled", True)),
+            "manual_review_below": float(section.get("manual_review_below", 0.60)),
+            "auto_triage_at_or_above": float(section.get("auto_triage_at_or_above", 0.80)),
+        }
+    except Exception:
+        return {"enabled": True, "manual_review_below": 0.60, "auto_triage_at_or_above": 0.80}
+
+
+def _record_batch_failure_incident(item: dict, result: dict, config: dict, *, dry_run: bool) -> None:
+    """Persist one failed batch item as a stage-5 repair incident."""
+    incidents_cfg = _load_incidents_config()
+    if not incidents_cfg["enabled"]:
+        return
+    from src.db import record_incident, set_incident_evidence_bundle
+    from src.incidents import (
+        build_evidence_bundle,
+        classify_failure,
+        compute_signature,
+        initial_confidence,
+        should_record,
+    )
+
+    status_text = str(result.get("status") or result.get("submit_result") or "")
+    error_text = str(result.get("error") or result.get("note") or "")
+    console_text = ""
+    console_log_path = result.get("console_logs")
+    if console_log_path:
+        try:
+            console_text = Path(console_log_path).read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            console_text = ""
+
+    classification = classify_failure(
+        status=status_text,
+        error_text=error_text,
+        console_text=console_text,
+        network_errors=result.get("network_errors") or [],
+        dry_run=dry_run,
+    )
+    if not should_record(classification, dry_run):
+        return
+
+    account_id = str(item.get("account_id") or config.get("account_id") or "")
+    site = str(item.get("site") or config.get("site") or "")
+    brand_name = str(item.get("brand_name") or "")
+    signature = compute_signature(
+        flow_type="5461",
+        error_class=f"{status_text} {error_text}".strip(),
+    )
+    db_path = str(project_root / "runtime" / "state" / "ledger.db")
+    incident, created = record_incident(
+        db_path,
+        signature=signature,
+        scope_type="site" if dry_run else "account",
+        flow_type="5461",
+        account_id=account_id,
+        marketplace=site,
+        brand_name=brand_name,
+        detector_type="batch",
+        classification=classification,
+        confidence=initial_confidence(classification),
+    )
+    steps = result.get("steps")
+    if isinstance(steps, list):
+        steps = steps[-10:]
+    evidence_files = result.get("evidence_files") or []
+    screenshots = [str(p) for p in evidence_files if str(p).lower().endswith(".png")]
+    captured_page = result.get("failure_page_evidence")
+    page_evidence = dict(captured_page) if isinstance(captured_page, dict) else {}
+    page_evidence.update({
+        "status": status_text,
+        "error": error_text,
+        "steps": steps,
+        "dashboard_check": result.get("dashboard_check"),
+        "monitor_summary": result.get("monitor_summary"),
+        "health_classification": result.get("health_classification"),
+        "network_errors": result.get("network_errors") or [],
+    })
+    bundle_dir = build_evidence_bundle(
+        int(incident["id"]),
+        project_root / "runtime" / "evidence",
+        page_evidence=page_evidence,
+        run_context={
+            "account_id": account_id,
+            "site": site,
+            "brand_name": brand_name,
+            "detector_type": "batch",
+            "dry_run": bool(dry_run),
+        },
+        screenshot_path=screenshots[-1] if screenshots else None,
+    )
+    set_incident_evidence_bundle(db_path, int(incident["id"]), str(bundle_dir))
+    action = "已记录" if created else "已聚合并刷新证据"
+    print(f"[Incidents] {action} incident #{incident['id']} ({classification}, signature={signature})")
 
 
 def navigate_group_home(context, anchor_page, group_key: tuple[str, str | None] | None, batch: dict) -> None:
@@ -105,20 +221,16 @@ def navigate_group_home(context, anchor_page, group_key: tuple[str, str | None] 
 
 
 def load_config(config_path: str) -> dict:
-    with open(config_path, 'r', encoding='utf-8') as f:
+    with open(config_path, encoding='utf-8') as f:
         return json.load(f)
 
 
 def save_batch_state(state_path: str, state: dict):
-    with open(state_path, 'w', encoding='utf-8') as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    atomic_write_json(state_path, state)
 
 
 def load_batch_state(state_path: str) -> dict:
-    if not Path(state_path).exists():
-        return None
-    with open(state_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    return read_json_tolerant(state_path)
 
 
 def expand_brands(brands: list[str]) -> list[str]:
@@ -183,21 +295,22 @@ def extract_statement_payload(statement_text: str) -> dict[str, str]:
     }
 
 
-def resolve_account_specific_uk_payload(
+def resolve_account_specific_site_payload(
     project_root: Path,
     brand_name: str,
     account_id: str,
+    target_site: str,
     manifest: dict,
     sync_result: dict,
 ) -> dict[str, str]:
-    """Return UK material only when an account-specific statement is available."""
+    """Return target-site material only when it is account-specific."""
 
     text, source = resolve_statement_text(
         project_root,
         brand_name,
         account_id,
-        "UK",
-        "UK",
+        target_site,
+        target_site,
         manifest,
         sync_result,
     )
@@ -206,10 +319,29 @@ def resolve_account_specific_uk_payload(
     if not source or not Path(source).name.endswith(expected_suffix):
         return {"title": "", "sku": "", "content": ""}
     payload = extract_statement_payload(text)
-    expected_prefix = f"{account_num}-UK-{brand_name}-".casefold()
+    expected_prefix = f"{account_num}-{target_site.upper()}-{brand_name}-".casefold()
     if not payload["sku"].casefold().startswith(expected_prefix):
         return {"title": "", "sku": "", "content": ""}
     return payload
+
+
+def resolve_account_specific_uk_payload(
+    project_root: Path,
+    brand_name: str,
+    account_id: str,
+    manifest: dict,
+    sync_result: dict,
+) -> dict[str, str]:
+    """Compatibility wrapper for callers/tests using the former helper."""
+
+    return resolve_account_specific_site_payload(
+        project_root,
+        brand_name,
+        account_id,
+        "UK",
+        manifest,
+        sync_result,
+    )
 
 
 def create_batch_state(
@@ -218,6 +350,8 @@ def create_batch_state(
     config: dict,
     site: str | None = None,
     feishu_country_option: str | None = None,
+    reapplication_campaign_id: int | None = None,
+    reapplication_attempt_id: int | None = None,
 ) -> dict:
     items = []
     for account in accounts:
@@ -227,6 +361,8 @@ def create_batch_state(
                 "brand_name": brand,
                 "site": normalize_site(site),
                 "feishu_country_option": str(feishu_country_option or "").strip(),
+                "reapplication_campaign_id": reapplication_campaign_id,
+                "reapplication_attempt_id": reapplication_attempt_id,
                 "status": "pending",
                 "result": None,
                 "started_at": None,
@@ -274,8 +410,8 @@ def schedule_followup_for_result(item: dict, result: dict, config: dict, dry_run
     eligible = bool(
         case_id
         and (
-            status in {"success", "under_review", "approved"}
-            or dashboard_status in {"under_review", "approved"}
+            status in {"success", "under_review", "approved", "declined"}
+            or dashboard_status in {"under_review", "approved", "declined"}
         )
     )
     if not eligible:
@@ -303,6 +439,58 @@ def schedule_followup_for_result(item: dict, result: dict, config: dict, dry_run
         uk_sku=str(result.get("feishu_uk_sku") or ""),
         uk_title=str(result.get("feishu_uk_title") or ""),
         uk_content=str(result.get("feishu_uk_content") or ""),
+        us_sku=str(result.get("feishu_us_sku") or ""),
+        us_title=str(result.get("feishu_us_title") or ""),
+        us_content=str(result.get("feishu_us_content") or ""),
+        reapplication_campaign_id=item.get("reapplication_campaign_id"),
+        reapplication_attempt_id=item.get("reapplication_attempt_id"),
+    )
+
+
+def schedule_case_id_recovery_for_result(
+    item: dict,
+    result: dict,
+    config: dict,
+    dry_run: bool = False,
+) -> dict | None:
+    """Queue a Selling Applications lookup when submission may lack only a Case ID."""
+
+    if dry_run:
+        return None
+    from src.case_id_recovery import (
+        is_case_id_recovery_candidate,
+        schedule_case_id_recovery,
+    )
+    from src.config_loader import load_yaml
+
+    if not is_case_id_recovery_candidate(result):
+        return None
+    settings = load_yaml(str(project_root / "config" / "settings.yaml"))
+    settings["case_followup"] = dict(config.get("case_followup") or {})
+    return schedule_case_id_recovery(
+        settings,
+        account_id=item["account_id"],
+        site=normalize_site(item.get("site")) or str(result.get("actual_marketplace") or ""),
+        brand_name=item["brand_name"],
+        sku=str(result.get("synced_sku") or ""),
+        submitted_at=(
+            result.get("submission_started_at")
+            or item.get("completed_at")
+            or datetime.now().isoformat()
+        ),
+        feishu_country_option=str(
+            result.get("feishu_country_option") or item.get("feishu_country_option") or ""
+        ),
+        submission_title=str(result.get("feishu_title") or ""),
+        submission_content=str(result.get("feishu_content") or ""),
+        uk_sku=str(result.get("feishu_uk_sku") or ""),
+        uk_title=str(result.get("feishu_uk_title") or ""),
+        uk_content=str(result.get("feishu_uk_content") or ""),
+        us_sku=str(result.get("feishu_us_sku") or ""),
+        us_title=str(result.get("feishu_us_title") or ""),
+        us_content=str(result.get("feishu_us_content") or ""),
+        reapplication_campaign_id=item.get("reapplication_campaign_id"),
+        reapplication_attempt_id=item.get("reapplication_attempt_id"),
     )
 
 
@@ -360,7 +548,7 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
             if ok:
                 print(f"[MONITOR] 旁路监控已启动: {monitor.out_dir}")
             else:
-                print(f"[WARN] 旁路监控启动失败，继续执行主流程")
+                print("[WARN] 旁路监控启动失败，继续执行主流程")
                 monitor = None
         except Exception as e:
             print(f"[WARN] 旁路监控初始化失败: {e}")
@@ -372,20 +560,12 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
         print(f"[SYNC] 账号: {account_id} | 品牌: {brand_name} | SKU: {sync_result['sku']}")
 
         if dry_run:
-            print("[DRY RUN] 模拟执行")
-            time.sleep(0.2)
-            result = {
-                "status": "dry_run",
-                "note": f"模拟执行成功；已同步 SKU {sync_result['sku']}",
-                "account_created": account_meta["created"],
-                "matched_profile": account_meta["matched_profile"],
-            }
-            if monitor:
-                summary = monitor.stop()
-                result["monitor_summary"] = summary
-                result["network_errors"] = monitor.get_errors()
-                print(f"[MONITOR] 监控摘要: events={summary['events_count']}, requests={summary['requests_count']}, 429={summary['rate_limit_429_count']}")
-            return result
+            # dry-run 新语义（方案 2）：不再是模拟执行，而是真实打开浏览器走完整
+            # 表单流程到"点击提交"前一步——切换市场、填 Add Product、触发授权面板、
+            # 填 5461 表单、上传文件、截图留证——但绝不点击提交按钮。
+            # 通过 no_submit=True 透传给 submit_5461_from_add_product，
+            # 其返回 submit_result="dry_run"，下面统一映射为批次 status="dry_run"。
+            print("[DRY RUN] 真实执行到提交前一步：走完整表单流程但不点击提交，全程截图留证")
 
         acc = account_meta["account"]
         account_email = resolve_account_email(acc)
@@ -452,12 +632,12 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                     add_product_url = add_product_url.replace('?&', '?').replace('&&', '&')
                     if add_product_url.endswith('&') or add_product_url.endswith('?'):
                         add_product_url = add_product_url[:-1]
-                    print(f"[OVERRIDE] 已清理站点特定参数，使用通用 URL")
+                    print("[OVERRIDE] 已清理站点特定参数，使用通用 URL")
                 elif not current_domain:
                     add_product_url = f"https://{target_domain}/abis/listing/create/product_identity?productType=SCREEN_PROTECTOR#product_identity"
                     print(f"[OVERRIDE] URL 已重建为: {target_domain}")
                 else:
-                    print(f"[OVERRIDE] URL 域名相同，保留所有参数")
+                    print("[OVERRIDE] URL 域名相同，保留所有参数")
         
         upload_files = manifest.get("5461", {}).get("upload_files", [])
         statement_text, statement_source = resolve_statement_text(project_root, brand_name, account_id, site, marketplace, manifest, sync_result)
@@ -472,6 +652,19 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                 manifest,
                 sync_result,
             )
+        if (normalize_site(site) or marketplace).upper() == "US":
+            us_payload = dict(submission_payload)
+        elif (normalize_site(site) or marketplace).upper() == "MX":
+            us_payload = resolve_account_specific_site_payload(
+                project_root,
+                brand_name,
+                account_id,
+                "US",
+                manifest,
+                sync_result,
+            )
+        else:
+            us_payload = {"title": "", "sku": "", "content": ""}
 
         upload_file_paths = []
         for f in upload_files:
@@ -563,6 +756,9 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                 "feishu_uk_sku": uk_payload["sku"],
                 "feishu_uk_title": uk_payload["title"],
                 "feishu_uk_content": uk_payload["content"],
+                "feishu_us_sku": us_payload["sku"],
+                "feishu_us_title": us_payload["title"],
+                "feishu_us_content": us_payload["content"],
             }
             if monitor:
                 summary = monitor.stop()
@@ -587,12 +783,14 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                 page=page,
                 skip_market_switch=skip_market_switch,
                 skip_add_product_goto=skip_add_product_goto,
+                no_submit=dry_run,
             )
 
             result = {
                 "status": result.get("submit_result", "unknown"),
                 "note": result.get("note", ""),
                 "case_id": result.get("case_id"),
+                "submission_started_at": result.get("submission_started_at"),
                 "dashboard_check": result.get("dashboard_check"),
                 "evidence_files": result.get("evidence_files", []),
                 "steps": result.get("steps", []),
@@ -604,6 +802,9 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                 "feishu_uk_sku": uk_payload["sku"],
                 "feishu_uk_title": uk_payload["title"],
                 "feishu_uk_content": uk_payload["content"],
+                "feishu_us_sku": us_payload["sku"],
+                "feishu_us_title": us_payload["title"],
+                "feishu_us_content": us_payload["content"],
                 "console_logs": result.get("console_logs", ""),  # 429检测需要
                 "marketplace_switched": bool(result.get("marketplace_switched")),
                 "actual_marketplace": result.get("actual_marketplace"),
@@ -713,6 +914,7 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
     items.sort(key=lambda x: (x["account_id"], x.get("site") or ""))
 
     from playwright.sync_api import sync_playwright
+
     from scripts._flow_cli_common import load_runtime
 
     current_group = None
@@ -724,6 +926,11 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
     reuse_page = None  # 上一个品牌成功后留下的可复用页面
 
     for item in items:
+        # 品牌循环顶部是天然安全停止点：Web 控制台请求停止后，剩余品牌跳过并正常收尾
+        if stop_file_requested():
+            skipped_count = apply_stop_request(state, items)
+            print(f"[停止] 检测到 STOP 哨兵文件，剩余 {skipped_count} 个品牌标记为 skipped，批次正常收尾")
+            break
         group_key = (item["account_id"], item.get("site"))
 
         # 新分组：重新连接 AdsPower 浏览器，获取 context
@@ -922,6 +1129,7 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
         item["result"] = result
         item["completed_at"] = datetime.now().isoformat()
 
+        followup = None
         try:
             followup = schedule_followup_for_result(item, result, config, dry_run=dry_run)
             if followup:
@@ -936,17 +1144,37 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
             # successfully submitted application because scheduling failed.
             result["case_followup_error"] = str(followup_error)
             print(f"[CaseFollowup] 排队失败，提交结果保持不变: {followup_error}")
-        finally:
-            # These values are needed only by the immediate Feishu ensure call.
-            # Avoid retaining a second copy of the statement in batch_state.json.
-            for private_key in (
-                "feishu_title",
-                "feishu_content",
-                "feishu_uk_sku",
-                "feishu_uk_title",
-                "feishu_uk_content",
-            ):
-                result.pop(private_key, None)
+        if not followup:
+            try:
+                recovery = schedule_case_id_recovery_for_result(
+                    item,
+                    result,
+                    config,
+                    dry_run=dry_run,
+                )
+                if recovery:
+                    result["case_id_recovery"] = recovery
+                    created_text = "已创建" if recovery.get("created") else "已存在"
+                    print(
+                        f"[CaseIdRecovery] {created_text}: {item['brand_name']}，"
+                        f"计划检查时间 {recovery['scheduled_at']}"
+                    )
+            except Exception as recovery_error:
+                result["case_id_recovery_error"] = str(recovery_error)
+                print(f"[CaseIdRecovery] 排队失败，提交结果保持不变: {recovery_error}")
+        # These values are needed only by the immediate Feishu ensure call.
+        # Avoid retaining a second copy of the statement in batch_state.json.
+        for private_key in (
+            "feishu_title",
+            "feishu_content",
+            "feishu_uk_sku",
+            "feishu_uk_title",
+            "feishu_uk_content",
+            "feishu_us_sku",
+            "feishu_us_title",
+            "feishu_us_content",
+        ):
+            result.pop(private_key, None)
 
         if result.get("marketplace_switched") and (not result.get("actual_marketplace") or result.get("actual_marketplace") == item.get("site") or result.get("actual_marketplace") == normalize_site(item.get("site"))):
             group_market_switched = True
@@ -964,6 +1192,14 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
             state["summary"]["failed"] += 1
             state["summary"]["pending"] -= 1
 
+            # --- Stage-5 persisted anomaly detection ---
+            # Record the failure as a deduplicated repair incident. Never
+            # let incident bookkeeping affect the batch outcome.
+            try:
+                _record_batch_failure_incident(item, result, config, dry_run=dry_run)
+            except Exception as incident_error:
+                print(f"[Incidents] 记录失败（不影响批次结果）: {incident_error}")
+
             unresolved_status = str(result.get("status") or result.get("submit_result") or "").lower()
             unresolved_dashboard = result.get("dashboard_check") if isinstance(result.get("dashboard_check"), dict) else {}
             unresolved_dash_status = str(unresolved_dashboard.get("status") or "").lower()
@@ -977,21 +1213,23 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
                 break
 
             # --- 429/410001 暂停机制 ---
-            # 检测 console_logs 是否含 429，若是则暂停等人决定
-            is_429 = False
+            # 结合结构化网络事件判断；忽略 Katal/监控遥测端点的孤立 429。
+            console_text_for_rate_limit = ""
             console_log_path = result.get("console_logs")
             if console_log_path:
                 try:
-                    log_text = Path(console_log_path).read_text(encoding="utf-8", errors="ignore")
-                    if "status of 429" in log_text or "Too Many Requests" in log_text:
-                        is_429 = True
+                    console_text_for_rate_limit = Path(console_log_path).read_text(
+                        encoding="utf-8", errors="ignore"
+                    )
                 except Exception:
                     pass
-            if not is_429:
-                # 也检查 error 字段
-                err_str = str(result.get("error", "") or result.get("note", ""))
-                if "429" in err_str or "410001" in err_str:
-                    is_429 = True
+            from src.incidents import has_actionable_rate_limit
+            is_429 = has_actionable_rate_limit(
+                status=str(result.get("status") or result.get("submit_result") or ""),
+                error_text=str(result.get("error", "") or result.get("note", "")),
+                console_text=console_text_for_rate_limit,
+                network_errors=result.get("network_errors") or [],
+            )
 
             if is_429 and not dry_run:
                 print()
@@ -1075,7 +1313,7 @@ def print_summary(state: dict):
     print(f"  失败: {summary['failed']}")
     print(f"  待执行: {summary['pending']}")
 
-    print(f"\n批次详情:")
+    print("\n批次详情:")
     for batch in state["batches"]:
         status_icon = "✓" if batch["status"] == "completed" else "○" if batch["status"] == "pending" else "..."
         print(f"  批次 {batch['batch_no']}: {status_icon}")
@@ -1090,7 +1328,7 @@ def print_summary(state: dict):
                 failed_items.append(item)
 
     if failed_items:
-        print(f"\n失败项目:")
+        print("\n失败项目:")
         for item in failed_items:
             print(f"  - {item['account_id']} / {item['brand_name']}")
             print(f"    错误: {item.get('error', 'Unknown')}")
@@ -1102,10 +1340,10 @@ def main():
     parser = argparse.ArgumentParser(description='批量运行 5461 工作流')
     parser.add_argument('--config', help='配置文件路径')
     parser.add_argument('--accounts', help='账户列表（逗号分隔，如 us_store_530,us_store_529 或 530,529）')
-    parser.add_argument('--brands', help='品牌列表（逗号分隔，如 OUNNE,WILLONE；或 all）')
+    parser.add_argument('--brands', help='品牌列表（逗号分隔，如 DEMO_ORBIT,DEMO_WILL；或 all）')
     parser.add_argument('--batch-size', type=int, default=100, help='每批执行数量')
     parser.add_argument('--continue-from', type=int, default=1, help='从指定批次继续')
-    parser.add_argument('--dry-run', action='store_true', help='模拟执行模式')
+    parser.add_argument('--dry-run', action='store_true', help='真实执行到提交前一步：打开浏览器走完整表单流程但不点击提交，全程截图留证（耗时数分钟）')
     parser.add_argument('--site', help='指定站点/国家，如 US / UK / DE / MX / BE / NL / SE / FR / ES / IT')
     parser.add_argument('--state-file', default='data/batch_state.json', help='状态文件路径')
     parser.add_argument('--yes', '-y', action='store_true', help='自动确认，无需人工干预')
@@ -1119,6 +1357,8 @@ def main():
         '--feishu-country-option',
         help='飞书国家EU原始选项，例如 比利时1；用于区分再次或多次申请',
     )
+    parser.add_argument('--reapplication-campaign-id', type=int, help=argparse.SUPPRESS)
+    parser.add_argument('--reapplication-attempt-id', type=int, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
@@ -1139,7 +1379,7 @@ def main():
             print(f"\n加载现有状态: {state_path}")
             state = load_batch_state(str(state_path))
         else:
-            print(f"\n创建新批次...")
+            print("\n创建新批次...")
 
             if args.config:
                 config = load_config(args.config)
@@ -1185,6 +1425,8 @@ def main():
                 config,
                 site=args.site,
                 feishu_country_option=args.feishu_country_option or config.get("feishu_country_option"),
+                reapplication_campaign_id=args.reapplication_campaign_id,
+                reapplication_attempt_id=args.reapplication_attempt_id,
             )
             state_path.parent.mkdir(parents=True, exist_ok=True)
             save_batch_state(str(state_path), state)
@@ -1195,6 +1437,15 @@ def main():
                 for item in batch.get("items", []):
                     if item.get("status") not in {"completed", "skipped"}:
                         item["feishu_country_option"] = args.feishu_country_option.strip()
+
+        if (args.reapplication_campaign_id is None) != (args.reapplication_attempt_id is None):
+            raise ValueError("Both internal reapplication IDs are required")
+        if args.reapplication_campaign_id is not None:
+            for batch in state.get("batches", []):
+                for item in batch.get("items", []):
+                    if item.get("status") not in {"completed", "skipped"}:
+                        item["reapplication_campaign_id"] = args.reapplication_campaign_id
+                        item["reapplication_attempt_id"] = args.reapplication_attempt_id
 
         followup_config = dict(default_followup_config)
         followup_config.update(state.get("config", {}).get("case_followup") or {})
@@ -1241,7 +1492,6 @@ def main():
             if batch_no < len(state['batches']) and not args.dry_run:
                 # 默认自动继续，无需确认
                 print(f"\n批次 {batch_no} 完成。自动继续下一批...")
-                cont = 'y'
 
             if batch_no < len(state['batches']) and not args.dry_run:
                 # 增加批次间延迟，确保 AdsPower 浏览器完全重启
@@ -1257,13 +1507,38 @@ def main():
             try:
                 from src.case_followup import launch_case_followup_worker
 
-                worker = launch_case_followup_worker(runtime_settings)
+                followup_ids = []
+                for batch in state.get("batches", []):
+                    for item in batch.get("items", []):
+                        followup = (item.get("result") or {}).get("case_followup") or {}
+                        if followup.get("id"):
+                            followup_ids.append(int(followup["id"]))
+                worker = launch_case_followup_worker(
+                    runtime_settings,
+                    followup_ids=followup_ids or None,
+                )
                 if worker.get("started"):
                     print(f"[CaseFollowup] 后台 worker 已启动，PID={worker.get('pid')}")
                 elif worker.get("reason") == "already_running":
                     print(f"[CaseFollowup] 后台 worker 已在运行，PID={worker.get('pid')}")
             except Exception as worker_error:
                 print(f"[CaseFollowup] 后台 worker 启动失败: {worker_error}")
+            try:
+                from src.case_id_recovery import launch_case_id_recovery_worker
+
+                recovery_worker = launch_case_id_recovery_worker(runtime_settings)
+                if recovery_worker.get("started"):
+                    print(
+                        f"[CaseIdRecovery] 后台 worker 已启动，"
+                        f"PID={recovery_worker.get('pid')}"
+                    )
+                elif recovery_worker.get("reason") == "already_running":
+                    print(
+                        f"[CaseIdRecovery] 后台 worker 已在运行，"
+                        f"PID={recovery_worker.get('pid')}"
+                    )
+            except Exception as worker_error:
+                print(f"[CaseIdRecovery] 后台 worker 启动失败: {worker_error}")
         print("执行完成")
 
 

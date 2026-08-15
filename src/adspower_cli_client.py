@@ -16,6 +16,8 @@ import shutil
 import subprocess
 from typing import Any, Dict, List, Optional
 
+from src.windows_subprocess import no_window_kwargs
+
 
 class AdsPowerCliError(Exception):
     pass
@@ -150,7 +152,14 @@ class AdsPowerCliClient:
         if self.api_key and "-k" not in cmd and "--api-key" not in cmd:
             cmd.extend(["--api-key", self.api_key])
         try:
-            proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout or self.timeout, check=False)
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                timeout=timeout or self.timeout,
+                check=False,
+                **no_window_kwargs(),
+            )
         except FileNotFoundError as exc:
             raise AdsPowerCliError(str(exc)) from exc
         except subprocess.TimeoutExpired as exc:

@@ -20,7 +20,7 @@ import time
 import unicodedata
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from .form_filler import KatalFormFiller
 
@@ -68,6 +68,9 @@ _CONNECT_BRAND_FAILURE_MARKERS = (
     "no brands found",
     "no brand found",
 )
+
+_MANAGE_BRANDS_PATH = "/manage-your-brands?ref_=xx_myb_favb_xx"
+_BRAND_PACKS_ROOT = Path(__file__).resolve().parent.parent / "brand_packs"
 
 
 def get_approved_verification_config(settings: dict[str, Any]) -> dict[str, Any]:
@@ -124,6 +127,36 @@ def get_approved_verification_config(settings: dict[str, Any]) -> dict[str, Any]
 def _normalize_text(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value or "")
     return re.sub(r"\s+", " ", normalized).strip().casefold()
+
+
+def _load_brand_selection_keywords(
+    brand_name: str, brand_packs_root: Path | None = None
+) -> list[str]:
+    """Load the human-maintained exact Add brand descriptions for one brand."""
+    if not brand_name or Path(brand_name).name != brand_name:
+        return []
+    root = brand_packs_root or _BRAND_PACKS_ROOT
+    manifest_path = root / brand_name / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    return [
+        str(keyword).strip()
+        for keyword in manifest.get("brand_selection_keywords") or []
+        if str(keyword).strip()
+    ]
+
+
+def _connect_brand_config_for_brand(
+    config: dict[str, Any], brand_name: str, brand_packs_root: Path | None = None
+) -> dict[str, Any]:
+    """Prefer exact per-brand descriptions over generic category keywords."""
+    resolved = dict(config)
+    brand_keywords = _load_brand_selection_keywords(brand_name, brand_packs_root)
+    if brand_keywords:
+        resolved["category_keywords"] = brand_keywords
+    return resolved
 
 
 def _page_text(page) -> str:
@@ -200,6 +233,13 @@ def _goto(page, url: str, timeout_ms: int) -> None:
         page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 8_000))
     except Exception:
         pass
+
+
+def _manage_brands_direct_url(sellercentral_home_url: str) -> str:
+    """Return Amazon's stable regional Manage Your Brands destination."""
+    hostname = (urlsplit(sellercentral_home_url).hostname or "").casefold()
+    domain = "sellercentral.amazon.co.uk" if hostname.endswith("amazon.co.uk") else "sellercentral.amazon.com"
+    return f"https://{domain}{_MANAGE_BRANDS_PATH}"
 
 
 def _click_manage_brands_link(page, labels: list[str], timeout_ms: int) -> dict[str, Any]:
@@ -744,13 +784,13 @@ def verify_manage_brand(
                 page, list(config.get("menu_labels") or []), page_timeout_ms
             )
             if not navigation.get("opened"):
-                evidence_files.extend(_save_evidence(page, evidence_dir, "manage_brand_navigation_unknown"))
-                return {
-                    "result": "unknown",
-                    "reason": "未能从 Seller Central 菜单找到 Manage Your Brands 入口",
-                    "url": page.url,
-                    "navigation": navigation,
-                    "evidence_files": evidence_files,
+                destination = _manage_brands_direct_url(sellercentral_home_url)
+                _goto(page, destination, page_timeout_ms)
+                navigation = {
+                    **navigation,
+                    "opened": True,
+                    "method": "direct_url_fallback",
+                    "destination": destination,
                 }
 
         settle_seconds = max(0.0, float(config.get("settle_seconds") or 0.0))
@@ -801,7 +841,9 @@ def verify_manage_brand(
         connect_result = verify_connect_brand_authorization(
             page,
             brand_name,
-            dict(config.get("connect_brand") or {}),
+            _connect_brand_config_for_brand(
+                dict(config.get("connect_brand") or {}), brand_name
+            ),
             evidence_dir / "connect_brand",
         )
         evidence_files.extend(connect_result.get("evidence_files") or [])

@@ -3,3 +3,7 @@ requests==2.32.3
 PyYAML==6.0.2
 python-dotenv==1.0.1
 openpyxl>=3.1.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+# 仅用于 tests/web 的 FastAPI TestClient
+httpx==0.28.1

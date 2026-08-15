@@ -30,8 +30,10 @@ if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
 class KatalFormFiller:
     """Katal 表单填写器 V2 - 使用逐字符输入模拟真实用户"""
     
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, brand_name: str = ""):
         self.page = page
+        self.brand_name = str(brand_name or "").strip()
+        self.application_type_result = None
         # New Add Product UI has multiple pre-Continue normalization passes.
         # Keep Product ID exemption idempotent so a second pass never toggles it back off.
         self._new_ui_no_product_id_set = False
@@ -1672,11 +1674,150 @@ class KatalFormFiller:
             time.sleep(interval_sec)
         return False
 
+    def select_create_new_asins_application(self) -> dict:
+        """Select the create-ASIN application card when that exact safe path exists.
+
+        Brands that go directly to the form return ``none``.  A sell-products-only
+        or unrecognised chooser is deliberately not clicked and is left for human
+        review/incident handling.
+        """
+        from .application_type_selection import probe_application_type_options
+
+        probe = probe_application_type_options(self.page)
+        result = dict(probe)
+        result.update({"clicked": False, "fields_ready": False})
+        status = result.get("status")
+
+        if status != "create_new_asins_available":
+            self.application_type_result = result
+            return result
+
+        if not self.brand_name:
+            result.update({
+                "status": "target_brand_missing",
+                "reason": "create-ASIN card is visible but the target brand is unavailable",
+            })
+            self.application_type_result = result
+            return result
+
+        expected_text = f"Application to create new ASINs for {self.brand_name}"
+        exact_pattern = re.compile(
+            rf"^\s*Application\s+to\s+create\s+new\s+ASINs\s+for\s+{re.escape(self.brand_name)}\s*$",
+            re.I,
+        )
+        clicked_by = None
+
+        candidates = []
+        try:
+            candidates.append(("exact-text", self.page.get_by_text(exact_pattern).first))
+        except Exception:
+            pass
+        try:
+            candidates.append((
+                "application-tile-header",
+                self.page.locator('[data-cy="application_tile_header"]').filter(has_text=exact_pattern).first,
+            ))
+        except Exception:
+            pass
+        try:
+            candidates.append((
+                "application-kat-box",
+                self.page.locator("kat-box").filter(has_text=exact_pattern).first,
+            ))
+        except Exception:
+            pass
+
+        for label, locator in candidates:
+            try:
+                if locator.count() > 0 and locator.is_visible():
+                    if self._human_click_locator(locator, expected_text, timeout=10000):
+                        clicked_by = label
+                        break
+            except Exception:
+                continue
+
+        if not clicked_by:
+            try:
+                fallback = self.page.evaluate(
+                    """(expectedText) => {
+                        const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+                        const expected = normalize(expectedText).toLowerCase();
+                        const all = [];
+                        const visit = (root) => {
+                            for (const el of root.querySelectorAll('*')) {
+                                all.push(el);
+                                if (el.shadowRoot) visit(el.shadowRoot);
+                            }
+                        };
+                        visit(document);
+                        const matches = all.filter((el) => {
+                            const text = normalize(el.innerText || el.textContent).toLowerCase();
+                            return text === expected;
+                        }).sort((a, b) => a.childElementCount - b.childElementCount);
+                        if (!matches.length) return {clicked: false, reason: 'exact_brand_card_not_found'};
+                        const label = matches[0];
+                        const clickable = label.closest(
+                            'a, button, [role="button"], kat-box, ' +
+                            '[data-cy*="application"], [data-testid*="application"]'
+                        ) || label;
+                        clickable.scrollIntoView({block: 'center'});
+                        clickable.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                        clickable.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                        clickable.click();
+                        return {clicked: true, method: 'exact-brand-js'};
+                    }""",
+                    expected_text,
+                )
+                if fallback and fallback.get("clicked"):
+                    clicked_by = fallback.get("method") or "exact-brand-js"
+            except Exception:
+                pass
+
+        if not clicked_by:
+            result.update({
+                "status": "create_card_click_failed",
+                "reason": "exact create-new-ASINs card for the target brand was not clickable",
+            })
+            self.application_type_result = result
+            return result
+
+        fields_ready = self._wait_for_5461_real_fields(timeout_sec=24, interval_sec=2)
+        result.update({
+            "clicked": True,
+            "clicked_by": clicked_by,
+            "fields_ready": fields_ready,
+            "status": "create_card_selected" if fields_ready else "create_card_selected_form_not_ready",
+        })
+        self.application_type_result = result
+        return result
+
     def click_apply_to_sell(self) -> bool:
         """
         点击 Apply to sell 按钮，支持 429/410001 错误重试
         """
         print("[FormFiller] 点击 Apply to sell 按钮...")
+
+        try:
+            if self._probe_5461_panel().get('hasRealFields'):
+                print("[FormFiller] 5461 真实字段已经可用，无需再次点击 Apply to sell")
+                return True
+        except Exception:
+            pass
+
+        # The application-type chooser may already be open (for example after
+        # Product Identity triggers it).  Handle it before looking for another
+        # Apply button so the panel is not mistaken for a half-loaded shell.
+        preselection = self.select_create_new_asins_application()
+        if preselection.get('clicked') and preselection.get('fields_ready'):
+            print("[FormFiller] 已选择 create new ASINs 申请入口，5461 字段可用")
+            return True
+        if preselection.get('status') in {
+            'sell_products_only', 'unknown_application_options',
+            'target_brand_missing', 'create_card_click_failed',
+        }:
+            print(f"[FormFiller] 申请类型面板需人工复核: {preselection.get('status')}")
+            return False
+        panel_already_open = bool(preselection.get('panel_found'))
         
         max_retries = 6
         wait_min = 18
@@ -1684,7 +1825,10 @@ class KatalFormFiller:
         for attempt in range(max_retries):
             try:
                 # 优先使用 Playwright hover/click，失败再 JS fallback。
-                result = self._click_apply_to_sell_human()
+                if attempt == 0 and panel_already_open:
+                    result = {"clicked": True, "location": "existing-application-panel"}
+                else:
+                    result = self._click_apply_to_sell_human()
                 
                 if result.get('clicked'):
                     print(f"[FormFiller] 已点击 Apply to sell ({result.get('location')})")
@@ -1694,6 +1838,23 @@ class KatalFormFiller:
                     # 注意：这里只做观测，不强制 display=block；强制显示会把半加载 shell 误判为真表单。
                     panel_check = self._probe_5461_panel()
                     print(f"[FormFiller] 5461 弹窗状态: {panel_check}")
+                    if not panel_check.get('hasRealFields'):
+                        # The application-type chooser is a real, visible panel, but it
+                        # does not contain the legacy Listing approval markers used by
+                        # _probe_5461_panel.  Probe it even when ``found`` is false so we
+                        # can safely select the exact create-new-ASINs card instead of
+                        # retrying the obscured page-level View link.
+                        selection = self.select_create_new_asins_application()
+                        if selection.get('clicked') and selection.get('fields_ready'):
+                            print("[FormFiller] 已选择 create new ASINs 申请入口，5461 字段可用")
+                            return True
+                        if selection.get('status') in {
+                            'sell_products_only', 'unknown_application_options',
+                            'target_brand_missing', 'create_card_click_failed',
+                        }:
+                            print(f"[FormFiller] 申请类型面板需人工复核: {selection.get('status')}")
+                            return False
+
                     if panel_check.get('found') and not panel_check.get('hasRealFields'):
                         print("[FormFiller] 5461 panel 仅 shell/半加载，等待字段真实出现，不强制显示...")
                         # 检查 panel 内是否已有 Case ID；必须同时确认状态。

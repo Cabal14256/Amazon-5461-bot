@@ -1,5 +1,5 @@
 import src.flow_submit_5461 as flow
-from src.flow_submit_5461 import handle_brand_selection
+from src.flow_submit_5461 import connect_brand_in_5461_panel, handle_brand_selection
 
 
 class _CaptureFirstEvaluate:
@@ -14,7 +14,7 @@ class _CaptureFirstEvaluate:
 def test_brand_selection_entry_scans_kat_link():
     page = _CaptureFirstEvaluate()
 
-    assert handle_brand_selection(page, "JZG") is False
+    assert handle_brand_selection(page, "DEMO_JADE") is False
     assert "kat-link, button" in page.script
     assert "select brand" in page.script.lower()
 
@@ -63,11 +63,39 @@ def test_connect_brand_skeleton_waits_for_real_fields(monkeypatch):
     )
     state = {"page_type": "BRAND_SELECTION", "has_5461_form": False}
 
-    resolved, ready = flow.resolve_connect_brand_loading_state(object(), object(), "V-PORYADKU", state)
+    resolved, ready = flow.resolve_connect_brand_loading_state(object(), object(), "DEMO-SHIELD", state)
 
     assert ready is True
     assert waits == [(24, 2)]
     assert resolved == {"page_type": "5461_FORM_OPEN", "has_5461_form": True}
+
+
+class _PageWithUnmatchedConnectBrandDescription:
+    def evaluate(self, script, *_args):
+        if "return Array.from(" in script:
+            return [
+                {
+                    "index": 0,
+                    "name": "DEMO_WILL",
+                    "description": "Unrelated description",
+                    "text": "DEMO_WILL Unrelated description",
+                }
+            ]
+        if "brex-widget" in script:
+            return True
+        raise AssertionError("unexpected evaluate call")
+
+
+def test_connect_brand_does_not_guess_when_exact_description_is_configured():
+    result = connect_brand_in_5461_panel(
+        _PageWithUnmatchedConnectBrandDescription(),
+        "DEMO_WILL",
+        ["Brand offering toys, sporting goods, and household items."],
+    )
+
+    assert result["found"] is True
+    assert result["selected"] is False
+    assert "拒绝猜测" in result["note"]
 
 
 class _CountLocator:

@@ -8,6 +8,9 @@ from src.db import (
     finish_case_followup,
     init_db,
     list_case_followups,
+    reopen_case_followup_for_retry,
+    requeue_stale_case_followups,
+    upsert_case_outcome_status,
 )
 from src.marketplace_switcher import MarketplaceSwitcher
 
@@ -22,6 +25,26 @@ def test_case_detail_url_uses_existing_marketplace_domain_mapping():
         "?ie=UTF8&caseID=19999999999"
     )
     assert "sellercentral.amazon.com/" in case_detail_url("MX", "12345678901")
+
+
+def test_windows_followup_worker_does_not_inherit_iana_timezone():
+    env = case_followup.build_worker_subprocess_env(
+        {"TZ": "Asia/Taipei", "KEEP_ME": "yes"},
+        platform_name="nt",
+    )
+
+    assert "TZ" not in env
+    assert env["KEEP_ME"] == "yes"
+    assert env["PYTHONUTF8"] == "1"
+
+
+def test_posix_followup_worker_preserves_timezone_override():
+    env = case_followup.build_worker_subprocess_env(
+        {"TZ": "Asia/Taipei"},
+        platform_name="posix",
+    )
+
+    assert env["TZ"] == "Asia/Taipei"
 
 
 def test_classifies_confirmed_decline_reply():
@@ -54,6 +77,38 @@ def test_classifies_spanish_explicit_decline_reply():
     )
     assert result["result"] == "declined"
     assert result["is_success"] is False
+
+
+def test_classifies_not_approved_and_applications_closed_as_declined():
+    result = classify_case_reply(
+        "Answered",
+        [
+            _message(
+                "Amazon",
+                "You are not approved to create new ASINs for this brand, and "
+                "we are not accepting applications for approval.",
+            )
+        ],
+    )
+
+    assert result["result"] == "declined"
+    assert result["is_success"] is False
+
+
+def test_classifies_spanish_accepted_review_as_approved():
+    result = classify_case_reply(
+        "Answered",
+        [
+            _message(
+                "Amazon",
+                "Nos complace informarte que finalizamos la revisión y "
+                "aceptamos tu solicitud. Ahora puedes crear nuevos ASINs.",
+            )
+        ],
+    )
+
+    assert result["result"] == "approved"
+    assert result["is_success"] is True
 
 
 def test_answered_status_alone_is_not_approved():
@@ -100,7 +155,7 @@ def test_classifies_german_accepted_application_reply_as_approved():
                 "Amazon",
                 "Wir freuen uns, Ihnen mitteilen zu können, dass wir unsere Prüfung "
                 "abgeschlossen und Ihren Antrag akzeptiert haben. Sie können jetzt neue "
-                "ASINs für HOMEMO, SCREEN_PROTECTOR erstellen.",
+                "ASINs für DEMO_HOME, SCREEN_PROTECTOR erstellen.",
             )
         ],
     )
@@ -208,6 +263,9 @@ def test_case_approval_is_replaced_by_effective_verification(monkeypatch, tmp_pa
         def new_tab(self):
             return self.page
 
+        def close_tabs_except_hosts(self, _allowed_hosts, kept_pages=None):
+            return {"closed": 0, "kept": 0, "failed": 0}
+
         def close(self):
             pass
 
@@ -300,10 +358,10 @@ def test_targeted_claim_does_not_take_another_due_followup(tmp_path):
     init_db(db_path)
     due = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
     first_id, _ = enqueue_case_followup(
-        db_path, "us_store_667", "SE", "WILLONE", "19999999993", due, due
+        db_path, "us_store_007", "SE", "DEMO_WILL", "19999999993", due, due
     )
     target_id, _ = enqueue_case_followup(
-        db_path, "us_store_671", "BE", "HOMEMO", "19999999992", due, due
+        db_path, "us_store_002", "BE", "DEMO_HOME", "19999999992", due, due
     )
 
     claimed = claim_due_case_followups(db_path, limit=5, followup_ids=[target_id])
@@ -313,18 +371,282 @@ def test_targeted_claim_does_not_take_another_due_followup(tmp_path):
     assert untouched["status"] == "pending"
 
 
+def test_oldest_group_claim_leaves_later_groups_unclaimed(tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    due = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    first_id, _ = enqueue_case_followup(
+        db_path, "us_store_004", "BE", "DEMO_JADE", "19999999981", due, due
+    )
+    second_id, _ = enqueue_case_followup(
+        db_path, "us_store_004", "BE", "DEMO_VISTA", "19999999982", due, due
+    )
+    later_id, _ = enqueue_case_followup(
+        db_path, "us_store_005", "BE", "DEMO_SHIELD", "19999999983", due, due
+    )
+
+    claimed = claim_due_case_followups(
+        db_path, limit=20, oldest_group_only=True
+    )
+
+    assert [row["id"] for row in claimed] == [first_id, second_id]
+    rows = {row["id"]: row for row in list_case_followups(db_path)}
+    assert rows[later_id]["status"] == "pending"
+    assert rows[later_id]["attempt_count"] == 0
+
+
+def test_account_scoped_group_claim_does_not_touch_older_account(tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    due = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    old_id, _ = enqueue_case_followup(
+        db_path, "us_store_007", "SE", "DEMO_WILL", "19999999971", due, due
+    )
+    target_id, _ = enqueue_case_followup(
+        db_path, "us_store_004", "BE", "DEMO_JADE", "19999999972", due, due
+    )
+
+    claimed = claim_due_case_followups(
+        db_path,
+        limit=20,
+        oldest_group_only=True,
+        account_id="us_store_004",
+        marketplace="BE",
+    )
+
+    assert [row["id"] for row in claimed] == [target_id]
+    rows = {row["id"]: row for row in list_case_followups(db_path)}
+    assert rows[old_id]["status"] == "pending"
+    assert rows[old_id]["attempt_count"] == 0
+
+
+def test_claim_records_worker_pid_and_dead_worker_requeued_immediately(tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    due = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    followup_id, _ = enqueue_case_followup(
+        db_path, "us_store_004", "BE", "DEMO_JADE", "19999999961", due, due
+    )
+
+    claimed = claim_due_case_followups(db_path, limit=1, claimed_pid=424242)
+    assert claimed[0]["claimed_pid"] == 424242
+
+    # last_checked_at is fresh (far from the 1h time threshold), but the
+    # claiming worker is verifiably dead, so recovery must not wait.
+    stale_before = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    requeued = requeue_stale_case_followups(db_path, stale_before, pid_alive=lambda pid: False)
+
+    assert requeued == 1
+    row = next(r for r in list_case_followups(db_path) if r["id"] == followup_id)
+    assert row["status"] == "retry"
+    assert row["claimed_pid"] is None
+
+
+def test_stale_requeue_keeps_rows_of_live_worker(tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    due = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    followup_id, _ = enqueue_case_followup(
+        db_path, "us_store_004", "BE", "DEMO_JADE", "19999999962", due, due
+    )
+    claim_due_case_followups(db_path, limit=1, claimed_pid=424243)
+
+    stale_before = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    requeued = requeue_stale_case_followups(db_path, stale_before, pid_alive=lambda pid: True)
+
+    assert requeued == 0
+    row = next(r for r in list_case_followups(db_path) if r["id"] == followup_id)
+    assert row["status"] == "running"
+
+
+def test_stale_requeue_time_fallback_for_rows_without_pid(tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    old = (datetime.now() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+    recent = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    old_id, _ = enqueue_case_followup(
+        db_path, "us_store_004", "BE", "DEMO_JADE", "19999999963", old, old
+    )
+    recent_id, _ = enqueue_case_followup(
+        db_path, "us_store_004", "BE", "DEMO_VISTA", "19999999964", recent, recent
+    )
+    claim_due_case_followups(db_path, due_at=old, limit=1, account_id="us_store_004", marketplace="BE")
+    claim_due_case_followups(db_path, limit=1, followup_ids=[recent_id])
+
+    stale_before = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    requeued = requeue_stale_case_followups(db_path, stale_before, pid_alive=lambda pid: False)
+
+    assert requeued == 1
+    rows = {r["id"]: r for r in list_case_followups(db_path)}
+    assert rows[old_id]["status"] == "retry"
+    assert rows[recent_id]["status"] == "running"
+
+
+def test_due_same_site_followups_share_one_browser_session(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    due = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    first_id, _ = enqueue_case_followup(
+        db_path, "us_store_002", "MX", "DEMO_JADE", "19999999987", due, due
+    )
+    second_id, _ = enqueue_case_followup(
+        db_path, "us_store_002", "MX", "DEMO_ORBIT", "19999999986", due, due
+    )
+    sessions = []
+    processed_sessions = []
+
+    class FakeSession:
+        def __init__(self, _settings, account_id, site):
+            self.account_id = account_id
+            self.site = site
+            self.close_calls = 0
+            sessions.append(self)
+
+        def close(self):
+            self.close_calls += 1
+
+    def fake_process(_settings, _task, update_records=True, browser_session=None):
+        processed_sessions.append(browser_session)
+        return {"result": "pending", "decision_reason": "still under review"}
+
+    monkeypatch.setattr(case_followup, "CaseFollowupBrowserSession", FakeSession)
+    monkeypatch.setattr(case_followup, "process_claimed_followup", fake_process)
+    settings = {"paths": {"db_path": db_path}, "case_followup": {}}
+
+    results = case_followup.process_due_case_followups(
+        settings=settings,
+        limit=2,
+        update_records=False,
+        followup_ids=[first_id, second_id],
+    )
+
+    assert len(results) == 2
+    assert len(sessions) == 1
+    assert processed_sessions == [sessions[0], sessions[0]]
+    assert sessions[0].account_id == "us_store_002"
+    assert sessions[0].site == "MX"
+    assert sessions[0].close_calls == 1
+
+
+def test_followup_session_close_stops_adspower_profile():
+    calls = []
+
+    class FakePage:
+        def close(self):
+            calls.append(("page_close", None))
+
+    class FakeManager:
+        def close_tabs_except_hosts(self, hosts):
+            calls.append(("tab_cleanup", hosts))
+
+        def close(self, *, stop_profile=False):
+            calls.append(("manager_close", stop_profile))
+
+    session = case_followup.CaseFollowupBrowserSession({}, "example-account", "US")
+    session.page = FakePage()
+    session.manager = FakeManager()
+    session.ready = True
+
+    session.close()
+
+    assert calls[-1] == ("manager_close", True)
+    assert session.manager is None
+    assert session.page is None
+    assert session.ready is False
+
+
+def test_effectively_approved_brand_skips_case_browser_check(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    due = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    followup_id, _ = enqueue_case_followup(
+        db_path, "us_store_002", "MX", "DEMO_JADE", "19999999985", due, due
+    )
+    upsert_case_outcome_status(
+        db_path,
+        "us_store_002",
+        "MX",
+        "demo_jade",
+        "approved",
+        method="case_reply_and_effective_approval",
+    )
+    monkeypatch.setattr(
+        case_followup,
+        "check_case_detail",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("approved brand must not open Case detail")
+        ),
+    )
+
+    results = case_followup.process_due_case_followups(
+        settings={"paths": {"db_path": db_path}, "case_followup": {}},
+        limit=1,
+        update_records=False,
+        followup_ids=[followup_id],
+    )
+    row = next(item for item in list_case_followups(db_path) if item["id"] == followup_id)
+
+    assert results[0]["result"] == "approved"
+    assert results[0]["skipped"] is True
+    assert results[0]["skip_reason"] == "already_effectively_approved"
+    assert row["status"] == "completed"
+    assert row["final_result"] == "approved"
+
+
+def test_false_approved_brand_is_not_skipped(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    due = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    followup_id, _ = enqueue_case_followup(
+        db_path, "us_store_002", "MX", "DEMO_ORBIT", "19999999984", due, due
+    )
+    upsert_case_outcome_status(
+        db_path,
+        "us_store_002",
+        "MX",
+        "DEMO_ORBIT",
+        "false_approved",
+        method="case_reply_and_effective_approval",
+    )
+    browser_checks = []
+    monkeypatch.setattr(
+        case_followup,
+        "check_case_detail",
+        lambda *_args, **_kwargs: browser_checks.append(True)
+        or {
+            "result": "pending",
+            "case_status": "Open",
+            "decision_reason": "still under review",
+            "evidence_dir": "",
+        },
+    )
+
+    results = case_followup.process_due_case_followups(
+        settings={
+            "paths": {"db_path": db_path},
+            "case_followup": {"retry_interval_hours": 1, "max_attempts": 3},
+        },
+        limit=1,
+        update_records=False,
+        followup_ids=[followup_id],
+    )
+
+    assert results[0]["result"] == "pending"
+    assert browser_checks == [True]
+
+
 def test_connection_circuit_defers_other_due_tasks_for_same_account(monkeypatch, tmp_path):
     db_path = str(tmp_path / "ledger.db")
     init_db(db_path)
     due = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
     first_id, _ = enqueue_case_followup(
-        db_path, "us_store_671", "BE", "HOMEMO", "19999999991", due, due
+        db_path, "us_store_002", "BE", "DEMO_HOME", "19999999991", due, due
     )
     second_id, _ = enqueue_case_followup(
-        db_path, "us_store_671", "BE", "JZG", "19999999990", due, due
+        db_path, "us_store_002", "BE", "DEMO_JADE", "19999999990", due, due
     )
     third_id, _ = enqueue_case_followup(
-        db_path, "us_store_667", "BE", "WILLONE", "19999999989", due, due
+        db_path, "us_store_007", "BE", "DEMO_WILL", "19999999989", due, due
     )
     monkeypatch.setattr(
         case_followup,
@@ -396,6 +718,118 @@ def test_pending_result_is_rescheduled_without_registration(monkeypatch, tmp_pat
     assert row["status"] == "retry"
     assert row["attempt_count"] == 1
     assert row["scheduled_at"] > datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_ai_timeout_retries_once_then_moves_to_manual_review(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    timestamp = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    followup_id, _ = enqueue_case_followup(
+        db_path, "us_store_000", "US", "ExampleBrand", "19999999995", timestamp, timestamp
+    )
+    settings = {
+        "paths": {"db_path": db_path},
+        "case_followup": {
+            "retry_interval_hours": 1,
+            "error_retry_interval_hours": 1,
+            "max_attempts": 12,
+            "registration_path": str(tmp_path / "registry.xlsx"),
+            "ai_reply_classification": {
+                "max_attempts": 2,
+                "retry_interval_minutes": 5,
+            },
+        },
+    }
+    monkeypatch.setattr(
+        case_followup,
+        "check_case_detail",
+        lambda *args, **kwargs: {
+            "result": "answered_unknown",
+            "case_status": "Answered",
+            "decision_reason": "Codex AI timed out",
+            "evidence_dir": "runtime/evidence/example",
+            "ai_classification": {"status": "timeout"},
+        },
+    )
+
+    first_task = claim_due_case_followups(db_path, limit=1)[0]
+    first = case_followup.process_claimed_followup(settings, first_task, update_records=False)
+    first_row = next(item for item in list_case_followups(db_path) if item["id"] == followup_id)
+    assert first_row["status"] == "retry"
+    assert first_row["ai_attempt_count"] == 1
+    assert first["ai_attempt_count"] == 1
+    assert first.get("rescheduled_at")
+
+    second_task = claim_due_case_followups(db_path, due_at="2999-01-01 00:00:00", limit=1)[0]
+    second = case_followup.process_claimed_followup(settings, second_task, update_records=False)
+    second_row = next(item for item in list_case_followups(db_path) if item["id"] == followup_id)
+    assert second_row["status"] == "manual_review"
+    assert second_row["ai_attempt_count"] == 2
+    assert second["ai_attempt_count"] == 2
+
+
+def test_ai_forbidden_uses_longer_retry_cooldown(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    timestamp = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    followup_id, _ = enqueue_case_followup(
+        db_path, "us_store_000", "US", "ExampleBrand", "19999999993", timestamp, timestamp
+    )
+    task = claim_due_case_followups(db_path, limit=1)[0]
+    settings = {
+        "paths": {"db_path": db_path},
+        "case_followup": {
+            "max_attempts": 12,
+            "registration_path": str(tmp_path / "registry.xlsx"),
+            "ai_reply_classification": {
+                "max_attempts": 2,
+                "retry_interval_minutes": 5,
+                "forbidden_retry_interval_minutes": 30,
+            },
+        },
+    }
+    monkeypatch.setattr(
+        case_followup,
+        "check_case_detail",
+        lambda *args, **kwargs: {
+            "result": "answered_unknown",
+            "case_status": "Answered",
+            "decision_reason": "Codex request forbidden",
+            "evidence_dir": "runtime/evidence/example",
+            "ai_classification": {"status": "forbidden"},
+        },
+    )
+
+    before = datetime.now() + timedelta(minutes=29)
+    case_followup.process_claimed_followup(settings, task, update_records=False)
+    row = next(item for item in list_case_followups(db_path) if item["id"] == followup_id)
+
+    assert row["status"] == "retry"
+    assert row["error"] == "codex_ai_forbidden"
+    assert row["scheduled_at"] > before.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_operator_can_reopen_manual_followup_without_duplicate(tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    timestamp = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    followup_id, _ = enqueue_case_followup(
+        db_path, "us_store_000", "US", "ExampleBrand", "19999999994", timestamp, timestamp
+    )
+    finish_case_followup(
+        db_path,
+        followup_id,
+        "manual_review",
+        "answered_unknown",
+        "Answered",
+        "AI timeout",
+        "runtime/evidence/example",
+    )
+
+    assert reopen_case_followup_for_retry(db_path, followup_id) is True
+    row = next(item for item in list_case_followups(db_path) if item["id"] == followup_id)
+    assert row["status"] == "retry"
+    assert row["completed_at"] is None
 
 
 def test_false_approved_is_terminal_and_registered(monkeypatch, tmp_path):

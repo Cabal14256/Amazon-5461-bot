@@ -8,7 +8,12 @@ from src.browser_manager import BrowserConnectionError, BrowserManager
 
 
 class _FakePage:
-    url = "https://sellercentral.amazon.co.uk/home?secret=query"
+    def __init__(self, url="https://sellercentral.amazon.co.uk/home?secret=query"):
+        self.url = url
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
 
 class _FakeContext:
@@ -109,6 +114,45 @@ def test_browser_manager_uses_short_explicit_cdp_timeout_and_detaches(monkeypatc
     ]
     assert stopped == [True]
     assert fake_browser.close_calls == 0
+
+
+def test_browser_manager_closes_every_tab_except_exact_allowed_host():
+    manager = BrowserManager(client=_FakeClient())
+    context = _FakeContext()
+    context.pages = [
+        _FakePage("https://start.adspower.net/dashboard"),
+        _FakePage("https://sellercentral.amazon.com/cu/case-dashboard"),
+        _FakePage("about:blank"),
+        _FakePage("https://start.adspower.net/profile/123"),
+    ]
+    manager._context = context
+
+    counts = manager.close_tabs_except_hosts({"start.adspower.net"})
+
+    assert counts == {"closed": 2, "kept": 2, "failed": 0}
+    assert [page.closed for page in context.pages] == [False, True, True, False]
+
+
+def test_browser_manager_can_retain_one_work_page_during_cleanup():
+    manager = BrowserManager(client=_FakeClient())
+    context = _FakeContext()
+    work_page = _FakePage("https://sellercentral.amazon.com/cu/case-dashboard")
+    popup_page = _FakePage("https://sellercentral.amazon.com/help/hub")
+    context.pages = [
+        _FakePage("https://start.adspower.net/dashboard"),
+        work_page,
+        popup_page,
+    ]
+    manager._context = context
+
+    counts = manager.close_tabs_except_hosts(
+        {"start.adspower.net"},
+        kept_pages={work_page},
+    )
+
+    assert counts == {"closed": 1, "kept": 2, "failed": 0}
+    assert work_page.closed is False
+    assert popup_page.closed is True
 
 
 def test_browser_manager_restarts_once_after_cdp_handshake_failure(monkeypatch):
