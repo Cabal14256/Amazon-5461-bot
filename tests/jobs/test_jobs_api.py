@@ -163,14 +163,17 @@ def test_force_terminate_requires_admin(operator_client, admin_client, job_env):
         release_profile_lock(db, key, owner_id="job-blocker")
 
 
-# -- full chain: create -> queued -> completed --------------------------------
+# -- full chain: create -> dispatcher lifecycle -> completed -------------------
 
 
 def test_create_dispatch_complete_full_chain(operator_client, job_env):
     response = operator_client.post("/api/jobs/dry-run", json=VALID_BODY)
     assert response.status_code == 200, response.text
     job = response.json()["job"]
-    assert job["run_status"] == "queued"
+    # The API returns the live database row. The background dispatcher may
+    # advance it before the response is serialized, including completing this
+    # deliberately tiny fixture. Failure/unknown terminal states remain invalid.
+    assert job["run_status"] in {"queued", "starting", "running", "completed"}
     assert job["job_type"] == "dry_run"
     assert job["brands"] == ["TESTBRAND"]
     # No server-side filesystem paths leak into the API.
