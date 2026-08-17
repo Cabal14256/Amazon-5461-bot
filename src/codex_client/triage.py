@@ -39,6 +39,7 @@ from src.db import (
     create_repair_job,
     finish_repair_job,
     get_incident,
+    get_latest_triage_job,
     mark_incident_triaged,
     record_web_audit,
 )
@@ -477,10 +478,12 @@ def run_triage(
     """
     db_path = str(settings.db_path)
 
-    def _audit(result: str, job_id: int | None = None) -> None:
+    def _audit(result: str, job_id: int | None = None, extra: dict | None = None) -> None:
         detail = {"trigger": trigger}
         if job_id is not None:
             detail["job_id"] = job_id
+        if extra:
+            detail.update(extra)
         record_web_audit(
             db_path,
             action=AUDIT_ACTION,
@@ -509,6 +512,11 @@ def run_triage(
         _audit("unavailable")
         return _done("disabled", None, None)
 
+    if incident.get("evidence_status") != "ready" or incident.get("status") == "waiting_evidence":
+        missing = [str(item) for item in (incident.get("missing_evidence") or [])]
+        _audit("evidence_incomplete", extra={"missing_evidence": missing})
+        return _done("evidence_incomplete", None, None)
+
     probe = availability or check_availability(settings.codex_command)
     if not probe.available:
         job = create_repair_job(db_path, int(incident_id), stage="triage", status="unavailable")
@@ -524,8 +532,11 @@ def run_triage(
         job = _run_single_attempt(settings, incident, spawn=spawn)
     except Exception:  # noqa: BLE001 — triage must never break the caller
         logger.exception("[codex] 判因执行异常 incident=%s", incident_id)
-        _audit("error")
-        return _done("error", None, None)
+        job = get_latest_triage_job(db_path, int(incident_id))
+        if job is not None and job.get("status") == "running":
+            job = finish_repair_job(db_path, int(job["id"]), "failed") or job
+        _audit("error", job_id=int(job["id"]) if job else None)
+        return _done("error", job, None)
 
     if job["status"] == "schema_invalid":
         # One retry with a fresh subprocess and a fresh job row.
@@ -533,7 +544,10 @@ def run_triage(
             job = _run_single_attempt(settings, incident, spawn=spawn)
         except Exception:  # noqa: BLE001
             logger.exception("[codex] 判因重试异常 incident=%s", incident_id)
-            _audit("error")
+            latest = get_latest_triage_job(db_path, int(incident_id))
+            if latest is not None and latest.get("status") == "running":
+                latest = finish_repair_job(db_path, int(latest["id"]), "failed") or latest
+            _audit("error", job_id=int(latest["id"]) if latest else None)
             return _done("error", job, None)
 
     status = str(job["status"])

@@ -21,7 +21,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.db import get_conn, set_incident_evidence_bundle  # noqa: E402
-from src.incidents.evidence_bundle import build_evidence_bundle  # noqa: E402
+from src.incidents.evidence_bundle import assess_evidence_bundle, build_evidence_bundle  # noqa: E402
 from src.web.config import load_settings  # noqa: E402
 
 
@@ -44,6 +44,24 @@ def _iter_failed_items(payload: dict):
                 continue
             result = item.get("result") if isinstance(item.get("result"), dict) else {}
             yield item, result
+
+
+def _iter_success_items(payload: dict):
+    item_lists = []
+    for key in ("items", "results"):
+        if isinstance(payload.get(key), list):
+            item_lists.append(payload[key])
+    for batch in payload.get("batches") or []:
+        if isinstance(batch, dict) and isinstance(batch.get("items"), list):
+            item_lists.append(batch["items"])
+    for items in item_lists:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            status = str(result.get("status") or item.get("business_status") or "")
+            if status in {"success", "under_review", "dry_run"}:
+                yield item, result
 
 
 def _scan_files(root: Path):
@@ -76,6 +94,23 @@ def _collect_failures(root: Path) -> dict:
     return failures
 
 
+def _collect_success_contracts(root: Path) -> list[tuple[dict, dict]]:
+    successes: list[tuple[dict, dict]] = []
+    for path in _scan_files(root):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for item, result in _iter_success_items(payload):
+            evidence = result.get("success_page_evidence")
+            contract = evidence.get("dom_contract") if isinstance(evidence, dict) else None
+            if isinstance(contract, dict) and contract.get("nodes"):
+                successes.append((item, result))
+    return successes
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true", help="build bundles and update the DB")
@@ -91,13 +126,14 @@ def main() -> int:
     rows = conn.execute(
         """SELECT id, account_id, marketplace, brand_name, classification, occurrence_count
            FROM repair_incidents
-           WHERE COALESCE(evidence_bundle_path, '') = ''"""
+           WHERE COALESCE(evidence_bundle_path, '') = '' OR status='waiting_evidence'"""
     ).fetchall()
     conn.close()
     if args.incident_id is not None:
         rows = [r for r in rows if int(r[0]) == int(args.incident_id)]
 
     failures = _collect_failures(project_root)
+    success_contracts = _collect_success_contracts(project_root)
     matched, skipped = [], []
     for inc_id, account_id, marketplace, brand_name, classification, occ in rows:
         entries = failures.get((str(account_id), str(marketplace), str(brand_name))) or []
@@ -106,20 +142,56 @@ def main() -> int:
             continue
         matched.append((inc_id, account_id, marketplace, brand_name, classification, occ, entries))
 
-    print(f"incidents without bundle: {len(rows)}; matched: {len(matched)}; no history: {len(skipped)}")
+    print(
+        f"incidents needing bundle evaluation: {len(rows)}; matched: {len(matched)}; "
+        f"no history: {len(skipped)}; exact success contracts: {len(success_contracts)}"
+    )
     for inc_id, account_id, marketplace, brand_name, classification, _occ, entries in matched:
         print(f"  #{inc_id} {account_id}/{marketplace}/{brand_name} [{classification}] "
               f"<- {len(entries)} historical failure(s), e.g. {entries[-1]['source']}")
 
     if not args.write:
-        print("dry-run; pass --write to build bundles")
+        print("dry-run; pass --write to register fixtures, build bundles and re-evaluate gates")
         return 0
+
+
+    from src.incidents.success_contracts import (
+        infer_evidence_node,
+        infer_page_family,
+        load_previous_success,
+        register_known_good_contract,
+    )
+
+    registered = 0
+    for item, result in success_contracts:
+        evidence = result["success_page_evidence"]
+        contract = evidence["dom_contract"]
+        family = infer_page_family(evidence, contract)
+        node = infer_evidence_node(family, evidence)
+        row = register_known_good_contract(
+            db_path,
+            evidence_root,
+            flow_type="5461",
+            marketplace=str(item.get("site") or ""),
+            page_family=family,
+            evidence_node=node,
+            source_status=str(result.get("status") or ""),
+            contract=contract,
+            run_context={
+                "account_id": item.get("account_id"),
+                "brand_name": item.get("brand_name"),
+            },
+        )
+        registered += int(row is not None)
 
     built = 0
     for inc_id, account_id, marketplace, brand_name, _classification, occ, entries in matched:
         latest = entries[-1]
         result = latest["result"]
-        page_evidence = {
+        captured = result.get("failure_page_evidence")
+        page_evidence = dict(captured) if isinstance(captured, dict) else {}
+        dom_contract = page_evidence.pop("dom_contract", None)
+        page_evidence.update({
             "source": "batch_state_backfill",
             "status": result.get("status"),
             "note": result.get("note") or result.get("error"),
@@ -129,7 +201,7 @@ def main() -> int:
                  "note": e["result"].get("note") or e["result"].get("error")}
                 for e in entries
             ],
-        }
+        })
         run_context = {
             "account_id": account_id,
             "marketplace": marketplace,
@@ -140,13 +212,41 @@ def main() -> int:
             "source_file": latest["source"],
             "batch_created_at": latest["created_at"],
         }
+        probes = page_evidence.get("selector_probes") or {}
+        selectors = {
+            "declared_candidates": ["kat-button", "kat-panel-wrapper", "kat-input", "input[type=file]"],
+            "probes": probes,
+            "retrigger_candidates": result.get("retrigger_results") or [],
+        }
+        family = infer_page_family(page_evidence, dom_contract)
+        node = infer_evidence_node(family, page_evidence)
+        previous_success = load_previous_success(
+            db_path,
+            flow_type="5461",
+            marketplace=str(marketplace),
+            page_family=family,
+            evidence_node=node,
+        )
         bundle_dir = build_evidence_bundle(
             int(inc_id), evidence_root,
             page_evidence=page_evidence, run_context=run_context,
+            selectors=selectors,
+            dom_contract=dom_contract,
+            previous_success=previous_success,
         )
-        set_incident_evidence_bundle(db_path, int(inc_id), str(bundle_dir))
+        gate = assess_evidence_bundle(bundle_dir)
+        set_incident_evidence_bundle(
+            db_path,
+            int(inc_id),
+            str(bundle_dir),
+            evidence_status=gate["status"],
+            missing_evidence=gate["missing"],
+        )
         built += 1
-    print(f"built {built} bundle(s) under {evidence_root / 'incidents'}")
+    print(
+        f"registered {registered} success contract(s); built/re-evaluated {built} bundle(s) "
+        f"under {evidence_root / 'incidents'}"
+    )
     return 0
 
 

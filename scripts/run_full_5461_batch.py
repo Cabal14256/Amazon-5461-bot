@@ -97,6 +97,38 @@ def _load_incidents_config() -> dict:
         return {"enabled": True, "manual_review_below": 0.60, "auto_triage_at_or_above": 0.80}
 
 
+def _register_batch_success_contract(item: dict, result: dict, config: dict) -> None:
+    page_evidence = result.get("success_page_evidence")
+    if not isinstance(page_evidence, dict):
+        return
+    contract = page_evidence.get("dom_contract")
+    if not isinstance(contract, dict):
+        return
+    from src.incidents.success_contracts import (
+        infer_evidence_node,
+        infer_page_family,
+        register_known_good_contract,
+    )
+
+    status = str(result.get("status") or "")
+    page_family = infer_page_family(page_evidence, contract)
+    evidence_node = infer_evidence_node(page_family, page_evidence)
+    register_known_good_contract(
+        str(project_root / "runtime" / "state" / "ledger.db"),
+        project_root / "runtime" / "evidence",
+        flow_type="5461",
+        marketplace=str(item.get("site") or config.get("site") or ""),
+        page_family=page_family,
+        evidence_node=evidence_node,
+        source_status=status,
+        contract=contract,
+        run_context={
+            "account_id": item.get("account_id") or config.get("account_id"),
+            "brand_name": item.get("brand_name"),
+        },
+    )
+
+
 def _record_batch_failure_incident(item: dict, result: dict, config: dict, *, dry_run: bool) -> None:
     """Persist one failed batch item as a stage-5 repair incident."""
     incidents_cfg = _load_incidents_config()
@@ -104,6 +136,7 @@ def _record_batch_failure_incident(item: dict, result: dict, config: dict, *, dr
         return
     from src.db import record_incident, set_incident_evidence_bundle
     from src.incidents import (
+        assess_evidence_bundle,
         build_evidence_bundle,
         classify_failure,
         compute_signature,
@@ -158,6 +191,7 @@ def _record_batch_failure_incident(item: dict, result: dict, config: dict, *, dr
     screenshots = [str(p) for p in evidence_files if str(p).lower().endswith(".png")]
     captured_page = result.get("failure_page_evidence")
     page_evidence = dict(captured_page) if isinstance(captured_page, dict) else {}
+    dom_contract = page_evidence.pop("dom_contract", None)
     page_evidence.update({
         "status": status_text,
         "error": error_text,
@@ -166,7 +200,37 @@ def _record_batch_failure_incident(item: dict, result: dict, config: dict, *, dr
         "monitor_summary": result.get("monitor_summary"),
         "health_classification": result.get("health_classification"),
         "network_errors": result.get("network_errors") or [],
+        "retrigger_results": result.get("retrigger_results") or [],
     })
+    probes = page_evidence.get("selector_probes") or {}
+    selectors = {
+        "declared_candidates": {
+            "approval_controls": [
+                "kat-button[label*='Apply to sell']",
+                "button[aria-label*='Apply to sell']",
+                "[data-testid*='application-required']",
+                "kat-panel-wrapper[panel-visible='true']",
+            ],
+            "form_fields": [
+                "kat-input#question-cat_auth_mo_question_string_id_product_title",
+                "input[id*='document_upload'][id*='document_input']",
+                "kat-button#submit_button",
+            ],
+        },
+        "probes": probes,
+        "retrigger_candidates": result.get("retrigger_results") or [],
+    }
+    from src.incidents.success_contracts import infer_evidence_node, infer_page_family, load_previous_success
+
+    page_family = infer_page_family(page_evidence, dom_contract)
+    evidence_node = infer_evidence_node(page_family, page_evidence)
+    previous_success = load_previous_success(
+        db_path,
+        flow_type="5461",
+        marketplace=site,
+        page_family=page_family,
+        evidence_node=evidence_node,
+    )
     bundle_dir = build_evidence_bundle(
         int(incident["id"]),
         project_root / "runtime" / "evidence",
@@ -179,10 +243,23 @@ def _record_batch_failure_incident(item: dict, result: dict, config: dict, *, dr
             "dry_run": bool(dry_run),
         },
         screenshot_path=screenshots[-1] if screenshots else None,
+        selectors=selectors,
+        dom_contract=dom_contract,
+        previous_success=previous_success,
     )
-    set_incident_evidence_bundle(db_path, int(incident["id"]), str(bundle_dir))
+    gate = assess_evidence_bundle(bundle_dir)
+    updated_incident = set_incident_evidence_bundle(
+        db_path,
+        int(incident["id"]),
+        str(bundle_dir),
+        evidence_status=gate["status"],
+        missing_evidence=gate["missing"],
+    )
     action = "已记录" if created else "已聚合并刷新证据"
-    print(f"[Incidents] {action} incident #{incident['id']} ({classification}, signature={signature})")
+    print(
+        f"[Incidents] {action} incident #{incident['id']} "
+        f"({classification}, evidence={updated_incident['evidence_status']}, signature={signature})"
+    )
 
 
 def navigate_group_home(context, anchor_page, group_key: tuple[str, str | None] | None, batch: dict) -> None:
@@ -810,6 +887,9 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                 "actual_marketplace": result.get("actual_marketplace"),
                 "page_ready_for_reuse": result.get("page_ready_for_reuse"),
                 "page_reuse_reason": result.get("page_reuse_reason"),
+                "failure_page_evidence": result.get("failure_page_evidence"),
+                "success_page_evidence": result.get("success_page_evidence"),
+                "retrigger_results": result.get("retrigger_results", []),
             }
             if monitor:
                 summary = monitor.stop()
@@ -871,6 +951,12 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                     result["state_loop_note"] = loop_result.get("error", "")
                     print(f"[WARN] StateLoopExecutor 备用也失败: {result['state_loop_note']}")
 
+            if result["status"] in ("success", "under_review", "dry_run"):
+                _register_batch_success_contract(
+                    {"account_id": account_id, "site": marketplace, "brand_name": brand_name},
+                    result,
+                    config,
+                )
             return result
 
     except Exception as e:

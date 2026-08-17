@@ -63,6 +63,7 @@ def _record_signal_incident(
 ) -> None:
     from src.db import record_incident, set_incident_evidence_bundle
     from src.incidents import (
+        assess_evidence_bundle,
         build_evidence_bundle,
         classify_failure,
         compute_signature,
@@ -108,7 +109,14 @@ def _record_signal_incident(
             },
             screenshot_path=payload.get("screenshot_path") or None,
         )
-        set_incident_evidence_bundle(db_path, int(incident["id"]), str(bundle_dir))
+        gate = assess_evidence_bundle(bundle_dir)
+        set_incident_evidence_bundle(
+            db_path,
+            int(incident["id"]),
+            str(bundle_dir),
+            evidence_status=gate["status"],
+            missing_evidence=gate["missing"],
+        )
 
 
 def read_signal(signal_path: Path = DEFAULT_SIGNAL_PATH) -> dict[str, Any] | None:

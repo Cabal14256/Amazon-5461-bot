@@ -167,6 +167,15 @@ def triage_incident_endpoint(
         raise HTTPException(status_code=404, detail="unknown_incident")
     if outcome["outcome"] == "disabled":  # race with the check above
         raise HTTPException(status_code=503, detail="codex_disabled")
+    if outcome["outcome"] == "evidence_incomplete":
+        incident = outcome.get("incident") or {}
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "evidence_incomplete",
+                "missing_evidence": incident.get("missing_evidence") or [],
+            },
+        )
     return {
         "outcome": outcome["outcome"],
         "job": RepairJobOut(**outcome["job"]) if outcome["job"] else None,

@@ -10,6 +10,7 @@ from playwright.sync_api import Page, sync_playwright
 
 from .amazon_error_handler import ensure_page_ready
 from .application_type_selection import classify_application_type_text
+from .capture.dom_contract import capture_dom_shadow_contract
 from .email_resolver import clean_email, get_autofill_email_from_page
 from .evidence import EVIDENCE_NODES, build_evidence_dir, capture_evidence_safe, write_text
 from .human_interaction import human_click, human_type
@@ -1107,6 +1108,7 @@ def capture_failure_page_evidence(page) -> dict:
         ) or {}
     except Exception as exc:
         errors.append(f"selector_probes: {exc}")
+    evidence["dom_contract"] = capture_dom_shadow_contract(page)
     if errors:
         evidence["capture_errors"] = errors
     return evidence
@@ -2848,6 +2850,7 @@ def submit_5461_from_add_product(
         "note": "",
         "evidence_files": [],
         "steps": [],
+        "retrigger_results": [],
         "marketplace_switched": False,
         "actual_marketplace": None,
     }
@@ -4138,7 +4141,18 @@ def submit_5461_from_add_product(
                 if '/description' in page.url:
                     print("\n[阶段 2/3] 到达 Description 且未检测到 5461，尝试左侧 Attributes → Product Identity 触发授权面板...")
                     result["steps"].append({"phase": 2, "action": "description_product_identity_retrigger", "status": "attempt"})
-                    retrigger_result = page.evaluate("""() => {
+                    retrigger_event = {
+                        "captured_at": datetime.now().isoformat(timespec="seconds"),
+                        "trigger": "description_product_identity",
+                        "navigation": {},
+                        "post_trigger_state": {},
+                        "apply_control_probe": {},
+                        "apply_click": {"attempted": False, "success": False},
+                        "outcome": "started",
+                        "errors": [],
+                    }
+                    try:
+                        retrigger_result = page.evaluate("""() => {
                         const candidates = [
                             document.querySelector('kat-box#hub-item-box-product_identity'),
                             document.querySelector('kat-box[data-testid="hub-item-box-product_identity"]'),
@@ -4155,7 +4169,13 @@ def submit_5461_from_add_product(
                         const chev = target.querySelector('[data-testid="hub-nav-item-state-right-chevron"], kat-icon[name="chevron-right-bold"]');
                         try { if (chev) chev.click(); } catch (e) {}
                         return { clicked: true, id: target.id || '', testid: target.getAttribute('data-testid') || '', text: (target.textContent || '').slice(0, 120) };
-                    }""")
+                        }""")
+                    except Exception as retrigger_exc:
+                        retrigger_event["errors"].append(f"navigation:{type(retrigger_exc).__name__}")
+                        retrigger_event["outcome"] = "navigation_error"
+                        result["retrigger_results"].append(retrigger_event)
+                        raise
+                    retrigger_event["navigation"] = retrigger_result or {}
                     print(f"[阶段 2/3] Product Identity 触发结果: {retrigger_result}")
                     # 等待 Apply to sell 按钮或 panel 出现，最多 6s
                     try:
@@ -4192,8 +4212,13 @@ def submit_5461_from_add_product(
                     except Exception:
                         pass
                     state = check_page_state(page)
+                    retrigger_event["post_trigger_state"] = {
+                        key: state.get(key)
+                        for key in ("page_type", "needs_auth", "has_5461_form", "needs_brand_selection")
+                    }
                     print(f"[阶段 2/3] Product Identity 触发后页面状态: {state['page_type']}")
-                    retrigger_apply = page.evaluate("""() => {
+                    try:
+                        retrigger_apply = page.evaluate("""() => {
                         const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
                         const all = Array.from(document.querySelectorAll('kat-button, button, a'));
                         const btn = all.find(b => ((b.getAttribute('label') || b.textContent || b.innerText || '').toLowerCase()).includes('apply to sell'));
@@ -4205,14 +4230,31 @@ def submit_5461_from_add_product(
                             hasApprovalText: bodyText.includes('you need approval to list this product') || bodyText.includes('brand authorisation required') || bodyText.includes('brand authorization required'),
                             buttonText: btn ? ((btn.getAttribute('label') || btn.textContent || btn.innerText || '').trim()) : ''
                         };
-                    }""")
+                        }""")
+                    except Exception as retrigger_exc:
+                        retrigger_event["errors"].append(f"apply_probe:{type(retrigger_exc).__name__}")
+                        retrigger_event["outcome"] = "apply_probe_error"
+                        result["retrigger_results"].append(retrigger_event)
+                        raise
+                    retrigger_event["apply_control_probe"] = retrigger_apply or {}
                     print(f"[阶段 2/3] Product Identity 触发后 Apply 检测: {retrigger_apply}")
                     result["steps"].append({"phase": 2, "action": "description_product_identity_retrigger", "status": "checked", "result": retrigger_apply})
                     if state.get('has_5461_form'):
                         print("[阶段 2/3] Product Identity 触发后已出现 5461 表单，继续填写...")
                     elif state.get('needs_auth') or state.get('page_type') == 'NEEDS_APPROVAL_NEW_UI' or retrigger_apply.get('found'):
                         print("[阶段 2/3] Product Identity 触发出授权面板，点击 Apply to sell...")
-                        apply_success = filler.click_apply_to_sell()
+                        try:
+                            apply_success = filler.click_apply_to_sell()
+                        except Exception as retrigger_exc:
+                            retrigger_event["apply_click"] = {"attempted": True, "success": False}
+                            retrigger_event["errors"].append(f"apply_click:{type(retrigger_exc).__name__}")
+                            retrigger_event["outcome"] = "apply_click_error"
+                            result["retrigger_results"].append(retrigger_event)
+                            raise
+                        retrigger_event["apply_click"] = {
+                            "attempted": True,
+                            "success": bool(apply_success),
+                        }
                         result["steps"].append({"phase": 2, "action": "click_apply_to_sell_after_product_identity_retrigger", "success": apply_success})
                         if apply_success:
                             # 等待 5461 panel 或表单字段出现，最多 10s
@@ -4226,9 +4268,19 @@ def submit_5461_from_add_product(
                             except Exception:
                                 pass
                             state = check_page_state(page)
+                            retrigger_event["post_apply_state"] = {
+                                key: state.get(key)
+                                for key in ("page_type", "needs_auth", "has_5461_form", "needs_brand_selection")
+                            }
                             print(f"[阶段 2/3] 触发后点击 Apply 的页面状态: {state['page_type']}")
                         else:
                             print("[阶段 2/3] Product Identity 触发后 Apply to sell 未拿到真实 5461 字段")
+                    retrigger_event["outcome"] = (
+                        "form_visible" if state.get("has_5461_form")
+                        else "apply_clicked_no_form" if retrigger_event["apply_click"]["attempted"]
+                        else "control_not_actionable"
+                    )
+                    result["retrigger_results"].append(retrigger_event)
                     # ★ 新增：BRAND_SELECTION 状态 — 页面有 "You need approval" + "Select brand" 按钮
                     # 此时 Apply to sell 按钮不存在，但需要点 Select brand → 选择品牌 → Connect this brand → 5461 panel
                     if not state.get('has_5461_form') and state.get('page_type') == 'BRAND_SELECTION':
@@ -4757,6 +4809,8 @@ def submit_5461_from_add_product(
             pre_dashboard_status = result.get("submit_result", "failed")
             if pre_dashboard_status in ("failed", "partial", "error", "uncertain"):
                 result["failure_page_evidence"] = capture_failure_page_evidence(page)
+            elif pre_dashboard_status in ("success", "under_review", "dry_run"):
+                result["success_page_evidence"] = capture_failure_page_evidence(page)
             try:
                 final_shot = evidence_dir / "final_state.png"
                 page.screenshot(path=str(final_shot), full_page=False, timeout=10000)

@@ -25,7 +25,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from src.codex_client.auto_triage import AutoTriageRunner
-from src.db import init_db
+from src.db import init_db, recover_stale_triage_jobs
 from src.jobs.manager import JobManager
 from src.repair.runner import RepairWorkflowRunner
 from src.web.api import (
@@ -86,6 +86,13 @@ def create_app(
         # other event-loop error.
         install_loop_noise_filter(asyncio.get_running_loop())
         # Reconcile DB state with process liveness *before* dispatching.
+        recover_stale_triage_jobs(str(settings.db_path))
+        try:
+            from src.repair.release_recovery import reconcile_git_operations
+
+            reconcile_git_operations(settings)
+        except ImportError:
+            pass
         manager.recover()
         manager.start()
         # Stage-6 auto-triage scanner: fully degraded no-op while disabled.

@@ -13,12 +13,13 @@ from src.incidents.detector import (
     is_telemetry_network_event,
     should_record,
 )
-from src.incidents.evidence_bundle import build_evidence_bundle
+from src.incidents.evidence_bundle import assess_evidence_bundle, build_evidence_bundle
 from src.incidents.signature import compute_signature
 
 __all__ = [
     "REPAIR_CLASSES",
     "build_evidence_bundle",
+    "assess_evidence_bundle",
     "classify_failure",
     "compute_signature",
     "has_actionable_rate_limit",

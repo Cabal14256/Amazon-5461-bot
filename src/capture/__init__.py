@@ -5,9 +5,10 @@ Capture module — 页面证据采集层
 旁路采集，不阻塞主流程。
 """
 
-from .page_capture import PageCapture, PageEvidence
+from .dom_contract import capture_dom_shadow_contract
 from .monitor import PageMonitor
 from .network_capture import NetworkCapture
+from .page_capture import PageCapture, PageEvidence
 from .redact import redact_text, default_redact
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "NetworkCapture",
     "redact_text",
     "default_redact",
+    "capture_dom_shadow_contract",
 ]

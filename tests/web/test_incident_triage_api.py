@@ -9,12 +9,13 @@ it answers ``--version`` and ``exec`` with a fixed JSONL stream plus an
 import json
 import sqlite3
 import sys
+from pathlib import Path
 
 import pytest
 
 from src.codex_client.auto_triage import run_auto_triage_scan
 from src.db import get_incident, record_incident, set_incident_evidence_bundle
-from src.incidents import build_evidence_bundle
+from src.incidents import assess_evidence_bundle, build_evidence_bundle
 from tests.web.conftest import TEST_PASSWORD, create_user, login
 
 MOCK_CODEX = r'''
@@ -80,14 +81,21 @@ def _seed(db_path, evidence_root=None, **overrides):
     }
     kwargs.update(overrides)
     incident, _ = record_incident(str(db_path), **kwargs)
-    if evidence_root is not None:
-        bundle = build_evidence_bundle(
-            incident["id"],
-            evidence_root,
-            page_evidence={"visible_text": "Apply to sell"},
-            run_context={"account_id": "us_store_999"},
-        )
-        set_incident_evidence_bundle(str(db_path), incident["id"], str(bundle))
+    evidence_root = evidence_root or Path(db_path).parent.parent / "evidence"
+    bundle = build_evidence_bundle(
+        incident["id"],
+        evidence_root,
+        page_evidence={"visible_text": "Apply to sell"},
+        run_context={"account_id": "us_store_999"},
+        selectors={"declared_candidates": ["kat-button"], "probes": {"count": 1}},
+        dom_contract={"schema_version": 1, "nodes": [{"tag": "kat-button"}]},
+        previous_success={"contract_hash": "a" * 64, "contract": {"nodes": [{"tag": "kat-button"}]}},
+    )
+    gate = assess_evidence_bundle(bundle)
+    set_incident_evidence_bundle(
+        str(db_path), incident["id"], str(bundle),
+        evidence_status=gate["status"], missing_evidence=gate["missing"],
+    )
     return get_incident(str(db_path), incident["id"])
 
 

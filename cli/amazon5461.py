@@ -234,6 +234,109 @@ def cmd_reapply_status(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_repair_uat(args: argparse.Namespace) -> int:
+    """Run the migration/evidence/switch audit before one read-only triage."""
+    from src.codex_client.availability import check_availability
+    from src.codex_client.triage import run_triage
+    from src.db import (
+        INCIDENT_REPAIR_CLASSES,
+        count_triage_jobs_today,
+        get_incident,
+        init_db,
+        record_web_audit,
+        recover_stale_triage_jobs,
+    )
+    from src.web.config import load_settings
+
+    settings = load_settings()
+    incident_id = int(args.incident_id)
+    checks: list[dict] = []
+    outcome = "internal_error"
+    exit_code = 1
+    triage_outcome = None
+    try:
+        init_db(str(settings.db_path))
+        recover_stale_triage_jobs(str(settings.db_path))
+        try:
+            from src.repair.release_recovery import reconcile_git_operations
+
+            reconcile_git_operations(settings)
+        except ImportError:
+            pass
+
+        incident = get_incident(str(settings.db_path), incident_id)
+        checks.append({"name": "incident_exists", "ok": incident is not None})
+        if incident is None:
+            outcome, exit_code = "unknown_incident", 2
+        else:
+            required_checks = (
+                ("incidents_enabled", bool(settings.incidents_enabled)),
+                ("codex_enabled", bool(settings.codex_enabled)),
+                ("release_disabled", not bool(settings.codex_release_enabled)),
+                ("repair_class", incident["classification"] in INCIDENT_REPAIR_CLASSES),
+                ("incident_open", incident["status"] == "open"),
+                ("evidence_ready", incident.get("evidence_status") == "ready"),
+                (
+                    "daily_quota",
+                    count_triage_jobs_today(str(settings.db_path))
+                    < int(settings.codex_daily_call_limit),
+                ),
+            )
+            checks.extend({"name": name, "ok": ok} for name, ok in required_checks)
+            availability = check_availability(settings.codex_command)
+            checks.append({"name": "codex_available", "ok": bool(availability.available)})
+            failed = [check["name"] for check in checks if not check["ok"]]
+            if failed:
+                outcome, exit_code = "gate_failed", 2
+            elif args.check_only:
+                outcome, exit_code = "check_ok", 0
+            else:
+                triage_outcome = run_triage(
+                    settings,
+                    incident_id,
+                    trigger="uat_cli",
+                    availability=availability,
+                )
+                outcome = str(triage_outcome.get("outcome") or "error")
+                exit_code = 0 if outcome == "ok" else 2 if outcome in {
+                    "evidence_incomplete", "disabled", "quota_exceeded", "unavailable"
+                } else 1
+    except Exception as exc:  # never leave UAT without a terminal audit
+        outcome, exit_code = "internal_error", 1
+        checks.append({"name": "internal_error", "ok": False, "error": type(exc).__name__})
+
+    detail = {
+        "check_only": bool(args.check_only),
+        "outcome": outcome,
+        "checks": checks,
+        "triage_job_id": (
+            (triage_outcome or {}).get("job", {}).get("id")
+            if isinstance((triage_outcome or {}).get("job"), dict)
+            else None
+        ),
+    }
+    try:
+        record_web_audit(
+            str(settings.db_path),
+            action="repair_uat",
+            target_type="repair_incident",
+            target_id=str(incident_id),
+            result=outcome,
+            detail=json.dumps(detail, ensure_ascii=False),
+        )
+    except Exception:
+        exit_code = 1
+        outcome = "audit_failed"
+        detail["outcome"] = outcome
+    if args.json:
+        print(json.dumps(detail, ensure_ascii=False))
+    else:
+        print(f"[Repair UAT] incident={incident_id} outcome={outcome}")
+        for check in checks:
+            print(f"  {'PASS' if check['ok'] else 'FAIL'} {check['name']}")
+    return exit_code
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m cli.amazon5461")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -315,6 +418,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("reapply-status", help="List local reapplication campaign states")
     p.set_defaults(func=cmd_reapply_status)
+
+    p = sub.add_parser("repair-uat", help="Migrate, gate-check and optionally run one read-only Codex triage")
+    p.add_argument("--incident-id", type=int, required=True)
+    p.add_argument("--check-only", action="store_true", help="Run gates and audit without creating a repair job")
+    p.add_argument("--json", action="store_true", help="Emit one machine-readable JSON result")
+    p.set_defaults(func=cmd_repair_uat)
 
     return parser
 

@@ -30,7 +30,7 @@ from src.db import (
     list_repair_jobs,
     record_incident,
 )
-from src.incidents import build_evidence_bundle
+from src.incidents import assess_evidence_bundle, build_evidence_bundle
 from src.web.config import WebSettings
 
 AVAILABLE = CodexAvailability(True, version="codex-cli 0.147.0-test")
@@ -87,10 +87,17 @@ def _incident(env, **overrides):
         env.evidence_root,
         page_evidence={"visible_text": "Apply to sell"},
         run_context={"account_id": "us_store_999"},
+        selectors={"declared_candidates": ["kat-button"], "probes": {"count": 1}},
+        dom_contract={"schema_version": 1, "nodes": [{"tag": "kat-button"}]},
+        previous_success={"contract_hash": "a" * 64, "contract": {"nodes": [{"tag": "kat-button"}]}},
     )
     from src.db import set_incident_evidence_bundle
 
-    set_incident_evidence_bundle(str(env.db_path), incident["id"], str(bundle))
+    gate = assess_evidence_bundle(bundle)
+    set_incident_evidence_bundle(
+        str(env.db_path), incident["id"], str(bundle),
+        evidence_status=gate["status"], missing_evidence=gate["missing"],
+    )
     return get_incident(str(env.db_path), incident["id"])
 
 

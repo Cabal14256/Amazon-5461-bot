@@ -24,6 +24,7 @@ from src.db import (  # noqa: E402
     get_incident,
     mark_incident_triaged,
     record_incident,
+    set_incident_evidence_bundle,
 )
 from tests.test_repair_worktree import git, make_git_repo  # noqa: E402
 from tests.web.conftest import TEST_PASSWORD, create_user, login  # noqa: E402
@@ -118,6 +119,9 @@ def _seed_triaged(settings, **overrides):
     }
     kwargs.update(overrides)
     incident, _ = record_incident(str(settings.db_path), **kwargs)
+    set_incident_evidence_bundle(
+        str(settings.db_path), incident["id"], "", evidence_status="ready", missing_evidence=[],
+    )
     mark_incident_triaged(str(settings.db_path), incident["id"])
     triage_job = create_repair_job(
         str(settings.db_path), incident["id"], stage="triage", status="succeeded"

@@ -150,11 +150,19 @@ class ReapplicationCampaignOut(_Model):
     route: list[str] = []
     current_route_index: int = 0
     status: str
+    source_case_followup_id: int | None = None
+    source_marketplace: str | None = None
     stop_reason: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
     completed_at: str | None = None
     attempts: list[ReapplicationAttemptOut] = []
+
+
+class ReapplicationStartRequest(_Model):
+    source_case_followup_id: int
+    confirmed_remaining_route: list[str]
+    authorize_submit: bool = False
 
 
 class JobCreateRequest(_Model):
@@ -250,6 +258,9 @@ class IncidentOut(_Model):
     first_seen_at: str | None = None
     last_seen_at: str | None = None
     evidence_bundle_path: str = ""
+    evidence_status: str = "incomplete"
+    missing_evidence: list[str] = []
+    evidence_checked_at: str | None = None
     resolution_note: str | None = None
     codex_thread_id: str | None = None
 
@@ -284,6 +295,7 @@ class RepairJobOut(_Model):
     validation_pid: int | None = None
     validation_started_at: str | None = None
     validation_heartbeat_at: str | None = None
+    runner_pid: int | None = None
     created_at: str | None = None
     finished_at: str | None = None
 

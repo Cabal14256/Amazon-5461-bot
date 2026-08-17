@@ -60,6 +60,7 @@ def test_list_incidents_shape_and_filters(viewer_client, web_settings):
         "id", "signature", "scope_type", "flow_type", "account_id", "marketplace",
         "brand_name", "detector_type", "classification", "confidence", "status",
         "occurrence_count", "first_seen_at", "last_seen_at", "evidence_bundle_path",
+        "evidence_status", "missing_evidence", "evidence_checked_at",
         "resolution_note", "codex_thread_id",
     }
     assert len(incident["signature"]) == 16

@@ -28,6 +28,7 @@ from src.db import (  # noqa: E402
     list_repair_jobs,
     mark_incident_triaged,
     record_incident,
+    set_incident_evidence_bundle,
 )
 from src.web.config import WebSettings  # noqa: E402
 from tests.test_repair_worktree import INCIDENT, git, make_git_repo  # noqa: E402
@@ -88,6 +89,9 @@ def _seed_incident(env, triage_payload=None, **overrides):
     }
     kwargs.update(overrides)
     incident, _ = record_incident(str(env.db_path), **kwargs)
+    set_incident_evidence_bundle(
+        str(env.db_path), incident["id"], "", evidence_status="ready", missing_evidence=[],
+    )
     if triage_payload is not None:
         mark_incident_triaged(str(env.db_path), incident["id"])
         triage_job = create_repair_job(

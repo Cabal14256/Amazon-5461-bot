@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,24 +22,29 @@ from fastapi.responses import PlainTextResponse
 from src.codex_client.patch import run_patch_generation
 from src.db import (
     AUTOMATION_JOB_TERMINAL_STATUSES,
+    abort_git_operation,
+    begin_git_operation,
+    complete_git_operation,
     get_automation_job,
+    get_latest_git_operation,
     get_repair_job,
     list_approvals,
     list_automation_job_items,
     mark_incident_rejected,
     mark_incident_rolled_back,
     now_str,
-    record_approval,
     record_approval_transition,
     record_web_audit,
     set_repair_job_status,
 )
 from src.repair.release import (
     ReleaseConflict,
+    RepositoryReleaseLock,
     merge_repair_branch,
     revert_release,
     verify_release_head,
 )
+from src.repair.release_recovery import reconcile_git_operations
 from src.web.deps import get_settings, require_role
 from src.web.schemas import (
     AutomationJobItemOut,
@@ -57,10 +61,10 @@ from src.web.schemas import (
 from src.web.services.evidence_index import classify_file
 
 router = APIRouter(tags=["repair"])
-_RELEASE_LOCK = threading.Lock()
 
 # Refusal outcomes that never started generation -> HTTP error mapping.
 _REFUSAL_STATUS = {
+    "evidence_incomplete": 409,
     "incident_not_triaged": 409,
     "incident_closed": 409,
     "active_patch_conflict": 409,
@@ -266,6 +270,7 @@ def get_repair_job_endpoint(job_id: int, request: Request):
         "canary_jobs": _canary_jobs(settings, canary),
         "restart_required": job["status"] == "release_pending_restart",
         "release_enabled": bool(settings.codex_release_enabled),
+        "git_operation": get_latest_git_operation(db_path, job_id),
     }
 
 
@@ -348,33 +353,68 @@ def approve_release_endpoint(
     settings = get_settings(request)
     if not settings.codex_release_enabled:
         raise HTTPException(status_code=403, detail="release_disabled")
-    with _RELEASE_LOCK:
+    try:
+        release_lock = RepositoryReleaseLock(settings, job_id=job_id, operation="release")
+        release_lock.__enter__()
+    except ReleaseConflict as exc:
+        _audit(request, user, job_id, "repair_approve_release", exc.code)
+        raise HTTPException(status_code=409, detail=exc.code) from None
+    try:
         job = _job_or_404(settings, job_id)
         if job["status"] != "awaiting_release_approval":
             raise HTTPException(status_code=409, detail="invalid_repair_job_state")
-        try:
-            merged = merge_repair_branch(
-                settings, job, expected_patch_sha=body.patch_sha.strip()
-            )
-        except ReleaseConflict as exc:
-            _audit(request, user, job_id, "repair_approve_release", exc.code)
-            raise HTTPException(status_code=409, detail=exc.code) from None
-        updated = record_approval_transition(
+        expected_patch_sha = body.patch_sha.strip()
+        if not expected_patch_sha or expected_patch_sha != str(job.get("patch_sha") or ""):
+            raise HTTPException(status_code=409, detail="stale_patch_sha")
+        begun = begin_git_operation(
             str(settings.db_path),
             repair_job_id=job_id,
-            decision="approve_release",
+            operation="release",
             actor_id=int(user["id"]),
             from_status="awaiting_release_approval",
-            to_status="release_pending_restart",
+            intent_status="releasing",
+            expected_head_sha=str(job.get("baseline_sha") or ""),
+            target_sha=expected_patch_sha,
             note=body.note.strip() or None,
-            extra_cols={
-                **merged,
-                "release_process_pid": os.getpid(),
-                "finished_at": None,
-            },
         )
-        if updated is None:
+        if begun is None:
             raise HTTPException(status_code=409, detail="release_state_changed")
+        operation, releasing_job = begun
+        try:
+            merged = merge_repair_branch(
+                settings, releasing_job, expected_patch_sha=expected_patch_sha
+            )
+        except ReleaseConflict as exc:
+            abort_git_operation(
+                str(settings.db_path),
+                int(operation["id"]),
+                intent_status="releasing",
+                error_code=exc.code,
+            )
+            _audit(request, user, job_id, "repair_approve_release", exc.code)
+            raise HTTPException(status_code=409, detail=exc.code) from None
+        try:
+            updated = complete_git_operation(
+                str(settings.db_path),
+                int(operation["id"]),
+                intent_status="releasing",
+                final_status="release_pending_restart",
+                result_sha=str(merged["release_sha"]),
+                extra_cols={
+                    **merged,
+                    "release_process_pid": os.getpid(),
+                    "finished_at": None,
+                },
+            )
+        except Exception:  # startup-safe journal reconciliation handles DB cut-points
+            updated = None
+    finally:
+        release_lock.__exit__(None, None, None)
+    if updated is None:
+        reconcile_git_operations(settings)
+        updated = get_repair_job(str(settings.db_path), job_id)
+        if updated is None or updated["status"] != "release_pending_restart":
+            raise HTTPException(status_code=409, detail="release_reconciliation_required")
     _audit(request, user, job_id, "repair_approve_release", "restart_required")
     return {"job": RepairJobOut(**updated), "restart_required": True}
 
@@ -460,7 +500,13 @@ def rollback_repair_endpoint(
     note = body.note.strip()
     if not note:
         raise HTTPException(status_code=422, detail="note_required")
-    with _RELEASE_LOCK:
+    try:
+        release_lock = RepositoryReleaseLock(settings, job_id=job_id, operation="rollback")
+        release_lock.__enter__()
+    except ReleaseConflict as exc:
+        _audit(request, user, job_id, "repair_rollback", exc.code)
+        raise HTTPException(status_code=409, detail=exc.code) from None
+    try:
         job = _job_or_404(settings, job_id)
         allowed = {
             "release_pending_restart", "post_release_check",
@@ -473,28 +519,50 @@ def rollback_repair_endpoint(
         post_job = get_automation_job(str(settings.db_path), post_id) if post_id else None
         if post_job and post_job["run_status"] not in AUTOMATION_JOB_TERMINAL_STATUSES:
             raise HTTPException(status_code=409, detail="post_release_check_active")
-        try:
-            rollback_sha = revert_release(settings, job)
-        except ReleaseConflict as exc:
-            _audit(request, user, job_id, "repair_rollback", exc.code)
-            raise HTTPException(status_code=409, detail=exc.code) from None
-        updated = set_repair_job_status(
-            str(settings.db_path),
-            job_id,
-            from_statuses=(str(job["status"]),),
-            to_status="rolled_back",
-            extra_cols={"rollback_sha": rollback_sha, "finished_at": now_str()},
-        )
-        if updated is None:
-            raise HTTPException(status_code=409, detail="rollback_state_changed")
-        record_approval(
+        begun = begin_git_operation(
             str(settings.db_path),
             repair_job_id=job_id,
-            decision="rollback",
+            operation="rollback",
             actor_id=int(user["id"]),
+            from_status=str(job["status"]),
+            intent_status="rolling_back",
+            expected_head_sha=str(job.get("release_sha") or ""),
+            target_sha=str(job.get("release_sha") or ""),
             note=note,
         )
-        mark_incident_rolled_back(str(settings.db_path), int(job["incident_id"]))
+        if begun is None:
+            raise HTTPException(status_code=409, detail="rollback_state_changed")
+        operation, rolling_job = begun
+        try:
+            rollback_sha = revert_release(settings, rolling_job)
+        except ReleaseConflict as exc:
+            abort_git_operation(
+                str(settings.db_path),
+                int(operation["id"]),
+                intent_status="rolling_back",
+                error_code=exc.code,
+            )
+            _audit(request, user, job_id, "repair_rollback", exc.code)
+            raise HTTPException(status_code=409, detail=exc.code) from None
+        try:
+            updated = complete_git_operation(
+                str(settings.db_path),
+                int(operation["id"]),
+                intent_status="rolling_back",
+                final_status="rolled_back",
+                result_sha=rollback_sha,
+                extra_cols={"rollback_sha": rollback_sha, "finished_at": now_str()},
+            )
+        except Exception:  # startup-safe journal reconciliation handles DB cut-points
+            updated = None
+    finally:
+        release_lock.__exit__(None, None, None)
+    if updated is None:
+        reconcile_git_operations(settings)
+        updated = get_repair_job(str(settings.db_path), job_id)
+        if updated is None or updated["status"] != "rolled_back":
+            raise HTTPException(status_code=409, detail="rollback_reconciliation_required")
+    mark_incident_rolled_back(str(settings.db_path), int(job["incident_id"]))
     _audit(request, user, job_id, "repair_rollback", "ok")
     return {"job": RepairJobOut(**updated)}
 

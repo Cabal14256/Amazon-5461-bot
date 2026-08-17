@@ -40,6 +40,12 @@ _PRIVATE_KEY_MARKERS = (
 _TEXT_EVIDENCE_SUFFIXES = {".json", ".txt", ".html", ".htm", ".md", ".csv"}
 
 _VISIBLE_TEXT_KEYS = ("visible_text", "body_text", "text", "page_text")
+REQUIRED_EVIDENCE = (
+    "page_summary",
+    "selectors_and_probes",
+    "dom_shadow_contract",
+    "previous_success",
+)
 
 
 def _write_json(path: Path, payload) -> None:
@@ -89,6 +95,72 @@ def _clean_run_context(run_context, extra_patterns: list[tuple[str, str]]) -> di
     if not isinstance(run_context, dict):
         return {}
     return _scrub_private_fields(run_context, extra_patterns)
+
+
+def sanitize_payload(payload, *, run_context=None):
+    """Return a de-identified payload suitable for repair fixtures/Codex."""
+    return _scrub_private_fields(payload, _identifier_patterns(run_context))
+
+
+def _selectors_ready(selectors) -> bool:
+    if not isinstance(selectors, dict):
+        return False
+    candidates = selectors.get("declared_candidates") or selectors.get("candidates")
+    probes = selectors.get("probes") or selectors.get("selector_probes")
+    return bool(candidates) and isinstance(probes, dict) and bool(probes)
+
+
+def _dom_contract_ready(dom_contract) -> bool:
+    return (
+        isinstance(dom_contract, dict)
+        and int(dom_contract.get("schema_version") or 0) >= 1
+        and isinstance(dom_contract.get("nodes"), list)
+        and bool(dom_contract.get("nodes"))
+    )
+
+
+def _previous_success_ready(previous_success) -> bool:
+    return (
+        isinstance(previous_success, dict)
+        and bool(previous_success.get("contract_hash"))
+        and isinstance(previous_success.get("contract"), dict)
+        and bool(previous_success.get("contract"))
+    )
+
+
+def assess_evidence_payloads(*, page_evidence, selectors, dom_contract, previous_success) -> dict:
+    """Evaluate the strict pre-Codex evidence contract."""
+    missing: list[str] = []
+    if not isinstance(page_evidence, dict) or not page_evidence:
+        missing.append("page_summary")
+    if not _selectors_ready(selectors):
+        missing.append("selectors_and_probes")
+    if not _dom_contract_ready(dom_contract):
+        missing.append("dom_shadow_contract")
+    if not _previous_success_ready(previous_success):
+        missing.append("previous_success")
+    return {
+        "status": "ready" if not missing else "incomplete",
+        "missing": missing,
+        "required": list(REQUIRED_EVIDENCE),
+    }
+
+
+def assess_evidence_bundle(bundle_dir: Path) -> dict:
+    """Read a bundle manifest without trusting caller-provided gate state."""
+    manifest_path = Path(bundle_dir) / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"status": "incomplete", "missing": list(REQUIRED_EVIDENCE)}
+    gate = manifest.get("evidence_gate") if isinstance(manifest, dict) else None
+    if not isinstance(gate, dict):
+        return {"status": "incomplete", "missing": list(REQUIRED_EVIDENCE)}
+    missing = gate.get("missing") if isinstance(gate.get("missing"), list) else list(REQUIRED_EVIDENCE)
+    return {
+        "status": "ready" if gate.get("status") == "ready" and not missing else "incomplete",
+        "missing": [str(item) for item in missing],
+    }
 
 
 def copy_sanitized_evidence_bundle(
@@ -241,12 +313,19 @@ def build_evidence_bundle(
     else:
         _mark("previous-success.json", absent=True, reason="no previous success reference")
 
+    gate = assess_evidence_payloads(
+        page_evidence=page_evidence,
+        selectors=selectors,
+        dom_contract=dom_contract,
+        previous_success=previous_success,
+    )
     _write_json(
         bundle_dir / "manifest.json",
         {
             "incident_id": int(incident_id),
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "files": files,
+            "evidence_gate": gate,
         },
     )
     return bundle_dir

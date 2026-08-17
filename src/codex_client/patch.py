@@ -295,7 +295,6 @@ def run_patch_generation(
     if not bool(getattr(settings, "codex_enabled", True)):
         _audit("unavailable")
         return _done("disabled", None)
-
     status = str(incident.get("status") or "")
     if status not in ("open", "triaged", "patching", "patch_ready"):
         _audit("incident_closed")
@@ -303,6 +302,9 @@ def run_patch_generation(
     if status != "triaged":
         _audit("incident_not_triaged")
         return _done("incident_not_triaged", None)
+    if incident.get("evidence_status") != "ready":
+        _audit("evidence_incomplete", missing_evidence=incident.get("missing_evidence") or [])
+        return _done("evidence_incomplete", None)
 
     triage_job = get_latest_triage_job(db_path, incident_id)
     triage = _load_triage_payload(settings, triage_job) if triage_job else None
