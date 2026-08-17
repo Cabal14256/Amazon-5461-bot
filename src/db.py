@@ -1,10 +1,9 @@
-\
-import sqlite3
 import json
-from pathlib import Path
+import sqlite3
+from collections.abc import Iterable
 from datetime import datetime, timedelta
-from typing import Optional, Iterable, Dict, Any, List
-
+from pathlib import Path
+from typing import Any
 
 SCHEMA_SQL = r'''
 CREATE TABLE IF NOT EXISTS submissions (
@@ -555,8 +554,8 @@ def init_db(db_path: str):
 
 
 def insert_submission(db_path: str, account_id: str, marketplace: str, brand_name: str,
-                      submit_result: str, case_id: Optional[str] = None, note: Optional[str] = None,
-                      submitted_at: Optional[str] = None) -> int:
+                      submit_result: str, case_id: str | None = None, note: str | None = None,
+                      submitted_at: str | None = None) -> int:
     submitted_at = submitted_at or now_str()
     conn = get_conn(db_path)
     cur = conn.cursor()
@@ -578,8 +577,8 @@ def upsert_submission_by_case_id(
     brand_name: str,
     case_id: str,
     submit_result: str,
-    note: Optional[str] = None,
-    submitted_at: Optional[str] = None,
+    note: str | None = None,
+    submitted_at: str | None = None,
 ) -> int:
     """Insert a submission or update the existing row for the same Case ID."""
     submitted_at = submitted_at or now_str()
@@ -619,7 +618,7 @@ def update_submission_case_outcome(
     brand_name: str,
     case_id: str,
     final_result: str,
-    note: Optional[str] = None,
+    note: str | None = None,
 ) -> int:
     """Persist a Case-detail outcome without confusing Answered with Approved."""
     return upsert_submission_by_case_id(
@@ -639,7 +638,7 @@ def upsert_case_outcome_status(
     marketplace: str,
     brand_name: str,
     current_status: str,
-    checked_at: Optional[str] = None,
+    checked_at: str | None = None,
     method: str = "case_reply",
 ) -> None:
     checked_at = checked_at or now_str()
@@ -679,8 +678,8 @@ def enqueue_case_followup(
     case_id: str,
     submitted_at: str,
     scheduled_at: str,
-    reapplication_campaign_id: Optional[int] = None,
-    reapplication_attempt_id: Optional[int] = None,
+    reapplication_campaign_id: int | None = None,
+    reapplication_attempt_id: int | None = None,
 ) -> tuple[int, bool]:
     """Persist one delayed Case check. Returns ``(id, created)``."""
     now = now_str()
@@ -760,9 +759,9 @@ def update_case_followup_feishu_binding(
     db_path: str,
     followup_id: int,
     binding_status: str,
-    record_id: Optional[str] = None,
-    country_option: Optional[str] = None,
-    reason: Optional[str] = None,
+    record_id: str | None = None,
+    country_option: str | None = None,
+    reason: str | None = None,
 ) -> bool:
     """Persist a read-only Feishu binding result for one Case task.
 
@@ -842,15 +841,15 @@ def requeue_stale_case_followups(db_path: str, stale_before: str, pid_alive=None
 
 def claim_due_case_followups(
     db_path: str,
-    due_at: Optional[str] = None,
+    due_at: str | None = None,
     limit: int = 1,
-    followup_ids: Optional[Iterable[int]] = None,
+    followup_ids: Iterable[int] | None = None,
     reapplication_only: bool = False,
     oldest_group_only: bool = False,
-    account_id: Optional[str] = None,
-    marketplace: Optional[str] = None,
-    claimed_pid: Optional[int] = None,
-) -> list[Dict[str, Any]]:
+    account_id: str | None = None,
+    marketplace: str | None = None,
+    claimed_pid: int | None = None,
+) -> list[dict[str, Any]]:
     due_at = due_at or now_str()
     selected_ids = [int(value) for value in (followup_ids or [])]
     conn = get_conn(db_path)
@@ -918,10 +917,10 @@ def claim_due_case_followups(
 
 def list_due_case_followup_groups(
     db_path: str,
-    due_at: Optional[str] = None,
-    followup_ids: Optional[Iterable[int]] = None,
+    due_at: str | None = None,
+    followup_ids: Iterable[int] | None = None,
     reapplication_only: bool = False,
-) -> list[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Read due account/site groups without claiming or changing task state."""
     due_at = due_at or now_str()
     selected_ids = [int(value) for value in (followup_ids or [])]
@@ -946,11 +945,11 @@ def finish_case_followup(
     db_path: str,
     followup_id: int,
     status: str,
-    final_result: Optional[str],
-    case_status: Optional[str],
-    decision_reason: Optional[str],
-    evidence_path: Optional[str],
-    error: Optional[str] = None,
+    final_result: str | None,
+    case_status: str | None,
+    decision_reason: str | None,
+    evidence_path: str | None,
+    error: str | None = None,
 ) -> None:
     now = now_str()
     conn = get_conn(db_path)
@@ -998,7 +997,7 @@ def reopen_case_followup_for_retry(
     db_path: str,
     followup_id: int,
     *,
-    scheduled_at: Optional[str] = None,
+    scheduled_at: str | None = None,
     reason: str = "operator_requested_retry",
 ) -> bool:
     """Reopen a recoverable Case task without creating a duplicate.
@@ -1030,11 +1029,11 @@ def reschedule_case_followup(
     db_path: str,
     followup_id: int,
     scheduled_at: str,
-    final_result: Optional[str],
-    case_status: Optional[str],
-    decision_reason: Optional[str],
-    evidence_path: Optional[str],
-    error: Optional[str] = None,
+    final_result: str | None,
+    case_status: str | None,
+    decision_reason: str | None,
+    evidence_path: str | None,
+    error: str | None = None,
 ) -> None:
     conn = get_conn(db_path)
     conn.execute(
@@ -1064,8 +1063,8 @@ def defer_due_case_followups_for_account(
     due_at: str,
     reason: str,
     *,
-    followup_ids: Optional[Iterable[int]] = None,
-    exclude_ids: Optional[Iterable[int]] = None,
+    followup_ids: Iterable[int] | None = None,
+    exclude_ids: Iterable[int] | None = None,
     reapplication_only: bool = False,
 ) -> int:
     """Defer unclaimed due tasks after a profile-level connection failure."""
@@ -1095,9 +1094,9 @@ def defer_due_case_followups_for_account(
 
 def get_next_case_followup_due(
     db_path: str,
-    followup_ids: Optional[Iterable[int]] = None,
+    followup_ids: Iterable[int] | None = None,
     reapplication_only: bool = False,
-) -> Optional[str]:
+) -> str | None:
     selected_ids = [int(value) for value in (followup_ids or [])]
     conn = get_conn(db_path)
     sql = """SELECT MIN(scheduled_at) AS scheduled_at FROM case_followups
@@ -1113,7 +1112,7 @@ def get_next_case_followup_due(
     return row["scheduled_at"] if row and row["scheduled_at"] else None
 
 
-def list_case_followups(db_path: str, statuses: Optional[Iterable[str]] = None) -> list[Dict[str, Any]]:
+def list_case_followups(db_path: str, statuses: Iterable[str] | None = None) -> list[dict[str, Any]]:
     conn = get_conn(db_path)
     sql = "SELECT * FROM case_followups"
     params: list[Any] = []
@@ -1128,8 +1127,8 @@ def list_case_followups(db_path: str, statuses: Optional[Iterable[str]] = None) 
 
 
 def insert_verification(db_path: str, account_id: str, marketplace: str, brand_name: str,
-                        method: str, result: str, summary_text: Optional[str] = None,
-                        confidence_points: int = 0, verified_at: Optional[str] = None) -> int:
+                        method: str, result: str, summary_text: str | None = None,
+                        confidence_points: int = 0, verified_at: str | None = None) -> int:
     verified_at = verified_at or now_str()
     conn = get_conn(db_path)
     cur = conn.cursor()
@@ -1146,7 +1145,7 @@ def insert_verification(db_path: str, account_id: str, marketplace: str, brand_n
 
 def insert_evidence_items(db_path: str, related_type: str, related_id: int,
                           file_paths: Iterable[str], evidence_type: str = "screenshot",
-                          created_at: Optional[str] = None):
+                          created_at: str | None = None):
     created_at = created_at or now_str()
     rows = [(related_type, related_id, evidence_type, str(p), created_at) for p in file_paths]
     if not rows:
@@ -1173,7 +1172,7 @@ def _map_verification_to_status(result: str, confidence_points: int, approved_th
 
 def upsert_brand_status_from_verification(db_path: str, account_id: str, marketplace: str, brand_name: str,
                                           method: str, result: str, confidence_points: int,
-                                          verified_at: Optional[str] = None, approved_threshold: int = 70):
+                                          verified_at: str | None = None, approved_threshold: int = 70):
     verified_at = verified_at or now_str()
     current_status = _map_verification_to_status(result, confidence_points, approved_threshold)
     conn = get_conn(db_path)
@@ -1224,13 +1223,13 @@ def mark_brand_status_pending_after_submission(db_path: str, account_id: str, ma
     conn.close()
 
 
-def list_approved_brands(db_path: str, account_id: Optional[str] = None, marketplace: Optional[str] = None):
+def list_approved_brands(db_path: str, account_id: str | None = None, marketplace: str | None = None):
     conn = get_conn(db_path)
     cur = conn.cursor()
     sql = '''SELECT account_id, marketplace, brand_name, current_status, confidence_score,
                     last_verified_at, last_method
              FROM brand_status_snapshot WHERE current_status='approved' '''
-    params: List[Any] = []
+    params: list[Any] = []
     if account_id:
         sql += " AND account_id=?"
         params.append(account_id)
@@ -1249,7 +1248,7 @@ def get_approved_brand_status(
     account_id: str,
     marketplace: str,
     brand_name: str,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Return the canonical effective approval for one exact account/site/brand."""
     conn = get_conn(db_path)
     row = conn.execute(
@@ -1267,13 +1266,13 @@ def get_approved_brand_status(
     return dict(row) if row else None
 
 
-def list_brand_status(db_path: str, account_id: str, marketplace: Optional[str] = None):
+def list_brand_status(db_path: str, account_id: str, marketplace: str | None = None):
     conn = get_conn(db_path)
     cur = conn.cursor()
     sql = '''SELECT account_id, marketplace, brand_name, current_status, confidence_score,
                     last_verified_at, last_method, updated_at
              FROM brand_status_snapshot WHERE account_id=?'''
-    params: List[Any] = [account_id]
+    params: list[Any] = [account_id]
     if marketplace:
         sql += " AND marketplace=?"
         params.append(marketplace)
@@ -1311,8 +1310,8 @@ def get_evidence_for_related(db_path: str, related_type: str, related_id: int):
     return rows
 
 
-def insert_decision_rule(db_path: str, name: str, flow_type: str, scope_type: str, scope_value: Optional[str],
-                         match_conditions: Dict[str, Any], action_plan: List[Dict[str, Any]],
+def insert_decision_rule(db_path: str, name: str, flow_type: str, scope_type: str, scope_value: str | None,
+                         match_conditions: dict[str, Any], action_plan: list[dict[str, Any]],
                          risk_level: str = "medium", requires_confirm: bool = True,
                          created_by: str = "user") -> int:
     ts = now_str()
@@ -1371,9 +1370,9 @@ def mark_rule_hit(db_path: str, rule_id: int):
 
 
 def insert_unknown_case(db_path: str, flow_type: str, account_id: str, marketplace: str, brand_name: str,
-                        page_url: Optional[str], page_title: Optional[str], screenshot_path: Optional[str],
-                        page_text_summary: Optional[str], dom_summary: Optional[str],
-                        ai_page_state: Optional[str], ai_confidence: Optional[float], ai_reason: Optional[str]) -> int:
+                        page_url: str | None, page_title: str | None, screenshot_path: str | None,
+                        page_text_summary: str | None, dom_summary: str | None,
+                        ai_page_state: str | None, ai_confidence: float | None, ai_reason: str | None) -> int:
     conn = get_conn(db_path)
     cur = conn.cursor()
     cur.execute(
@@ -1390,7 +1389,7 @@ def insert_unknown_case(db_path: str, flow_type: str, account_id: str, marketpla
     return uid
 
 
-def resolve_unknown_case(db_path: str, unknown_case_id: int, resolved_rule_id: Optional[int], resolution_note: Optional[str]):
+def resolve_unknown_case(db_path: str, unknown_case_id: int, resolved_rule_id: int | None, resolution_note: str | None):
     conn = get_conn(db_path)
     conn.execute(
         '''UPDATE unknown_cases
@@ -1412,7 +1411,7 @@ def list_pending_unknown_cases(db_path: str):
 
 
 def upsert_procedure_flow(db_path: str, flow_code: str, flow_type: str, name: str,
-                          marketplace: Optional[str] = None, brand_name: Optional[str] = None) -> int:
+                          marketplace: str | None = None, brand_name: str | None = None) -> int:
     ts = now_str()
     conn = get_conn(db_path)
     cur = conn.cursor()
@@ -1450,7 +1449,7 @@ def get_procedure_flow_by_code(db_path: str, flow_code: str):
     return row
 
 
-def list_procedure_flows(db_path: str, flow_type: Optional[str] = None):
+def list_procedure_flows(db_path: str, flow_type: str | None = None):
     conn = get_conn(db_path)
     cur = conn.cursor()
     if flow_type:
@@ -1463,7 +1462,7 @@ def list_procedure_flows(db_path: str, flow_type: Optional[str] = None):
 
 
 def set_procedure_flow_lifecycle(db_path: str, flow_code: str, lifecycle_status: str,
-                                 approved_by: Optional[str] = None, note: Optional[str] = None):
+                                 approved_by: str | None = None, note: str | None = None):
     allowed = {"draft", "uat_pending", "approved", "disabled"}
     if lifecycle_status not in allowed:
         raise ValueError(f"非法流程状态: {lifecycle_status}")
@@ -1500,9 +1499,9 @@ def mark_procedure_flow_uat_result(db_path: str, flow_code: str, run_id: int, pa
 
 
 def replace_procedure_step(db_path: str, flow_id: int, step_no: int, step_name: str,
-                           match_conditions: Dict[str, Any], action_plan: List[Dict[str, Any]],
-                           success_check: Optional[Dict[str, Any]] = None,
-                           failure_check: Optional[Dict[str, Any]] = None,
+                           match_conditions: dict[str, Any], action_plan: list[dict[str, Any]],
+                           success_check: dict[str, Any] | None = None,
+                           failure_check: dict[str, Any] | None = None,
                            risk_level: str = "medium", requires_confirm: bool = True):
     ts = now_str()
     conn = get_conn(db_path)
@@ -1540,7 +1539,7 @@ def list_procedure_steps(db_path: str, flow_id: int):
 
 
 def insert_procedure_run(db_path: str, flow_id: int, account_id: str, marketplace: str, brand_name: str,
-                         run_mode: str, status: str = "running", note: Optional[str] = None) -> int:
+                         run_mode: str, status: str = "running", note: str | None = None) -> int:
     conn = get_conn(db_path)
     cur = conn.cursor()
     cur.execute(
@@ -1554,7 +1553,7 @@ def insert_procedure_run(db_path: str, flow_id: int, account_id: str, marketplac
     return rid
 
 
-def update_procedure_run_status(db_path: str, run_id: int, status: str, note: Optional[str] = None):
+def update_procedure_run_status(db_path: str, run_id: int, status: str, note: str | None = None):
     conn = get_conn(db_path)
     conn.execute(
         "UPDATE procedure_runs SET status=?, finished_at=?, note=? WHERE id=?",
@@ -1564,10 +1563,10 @@ def update_procedure_run_status(db_path: str, run_id: int, status: str, note: Op
     conn.close()
 
 
-def insert_procedure_run_step(db_path: str, run_id: int, step_no: int, step_name: Optional[str],
-                              page_url: Optional[str], screenshot_path: Optional[str],
-                              action_plan: Optional[List[Dict[str, Any]]], result: str,
-                              detail: Optional[str] = None):
+def insert_procedure_run_step(db_path: str, run_id: int, step_no: int, step_name: str | None,
+                              page_url: str | None, screenshot_path: str | None,
+                              action_plan: list[dict[str, Any]] | None, result: str,
+                              detail: str | None = None):
     conn = get_conn(db_path)
     conn.execute(
         '''INSERT INTO procedure_run_steps(run_id, step_no, step_name, page_url, screenshot_path, action_plan_json,
@@ -1581,7 +1580,7 @@ def insert_procedure_run_step(db_path: str, run_id: int, step_no: int, step_name
     conn.close()
 
 
-def get_decision_rules_for_flow(db_path: str, flow_type: str) -> List[Dict[str, Any]]:
+def get_decision_rules_for_flow(db_path: str, flow_type: str) -> list[dict[str, Any]]:
     """获取指定流程类型的所有决策规则"""
     conn = get_conn(db_path)
     cur = conn.cursor()
@@ -1595,7 +1594,7 @@ def get_decision_rules_for_flow(db_path: str, flow_type: str) -> List[Dict[str, 
 
 
 def save_decision_rule(db_path: str, flow_type: str, condition: str, action: str,
-                       alternative_selector: Optional[str] = None,
+                       alternative_selector: str | None = None,
                        risk_level: str = "medium") -> int:
     """保存新的决策规则"""
     ts = now_str()
@@ -1624,7 +1623,7 @@ def save_decision_rule(db_path: str, flow_type: str, condition: str, action: str
 
 
 def add_web_user(db_path: str, username: str, password_hash: str, role: str = "viewer",
-                 display_name: Optional[str] = None) -> int:
+                 display_name: str | None = None) -> int:
     now = now_str()
     conn = get_conn(db_path)
     cur = conn.cursor()
@@ -1639,14 +1638,14 @@ def add_web_user(db_path: str, username: str, password_hash: str, role: str = "v
     return uid
 
 
-def get_web_user_by_username(db_path: str, username: str) -> Optional[Dict[str, Any]]:
+def get_web_user_by_username(db_path: str, username: str) -> dict[str, Any] | None:
     conn = get_conn(db_path)
     row = conn.execute("SELECT * FROM web_users WHERE username=?", (username,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
 
-def list_web_users(db_path: str) -> List[Dict[str, Any]]:
+def list_web_users(db_path: str) -> list[dict[str, Any]]:
     conn = get_conn(db_path)
     rows = conn.execute(
         '''SELECT id, username, role, display_name, disabled, created_at, updated_at, last_login_at
@@ -1691,10 +1690,10 @@ def update_web_user_last_login(db_path: str, user_id: int) -> None:
     conn.close()
 
 
-def record_web_audit(db_path: str, action: str, actor_id: Optional[int] = None,
-                     target_type: Optional[str] = None, target_id: Optional[str] = None,
-                     result: Optional[str] = None, ip_address: Optional[str] = None,
-                     detail: Optional[str] = None) -> int:
+def record_web_audit(db_path: str, action: str, actor_id: int | None = None,
+                     target_type: str | None = None, target_id: str | None = None,
+                     result: str | None = None, ip_address: str | None = None,
+                     detail: str | None = None) -> int:
     """Record one non-secret web console audit event (login/logout/user mgmt/evidence download)."""
     conn = get_conn(db_path)
     cur = conn.execute(
@@ -1730,7 +1729,7 @@ _AUTOMATION_JOB_UPDATABLE = {
 }
 
 
-def _automation_job_row_to_dict(row) -> Dict[str, Any]:
+def _automation_job_row_to_dict(row) -> dict[str, Any]:
     data = dict(row)
     try:
         data["brands"] = json.loads(data.pop("brands_json") or "[]")
@@ -1745,10 +1744,10 @@ def create_automation_job(
     job_type: str,
     created_by: str,
     account_id: str,
-    marketplace: Optional[str],
-    brands: List[str],
+    marketplace: str | None,
+    brands: list[str],
     run_status: str = "queued",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if job_type not in AUTOMATION_JOB_TYPES:
         raise ValueError(f"非法任务类型: {job_type}")
     # New jobs are born queued; waiting_human remains available for flows
@@ -1781,7 +1780,7 @@ def create_automation_job(
     return job
 
 
-def get_automation_job(db_path: str, job_id: str) -> Optional[Dict[str, Any]]:
+def get_automation_job(db_path: str, job_id: str) -> dict[str, Any] | None:
     conn = get_conn(db_path)
     row = conn.execute("SELECT * FROM automation_jobs WHERE id=?", (job_id,)).fetchone()
     conn.close()
@@ -1790,12 +1789,12 @@ def get_automation_job(db_path: str, job_id: str) -> Optional[Dict[str, Any]]:
 
 def list_automation_jobs(
     db_path: str,
-    run_status: Optional[str] = None,
-    job_type: Optional[str] = None,
-    account_id: Optional[str] = None,
+    run_status: str | None = None,
+    job_type: str | None = None,
+    account_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> tuple[List[Dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], int]:
     sql = "FROM automation_jobs WHERE 1=1"
     params: list[Any] = []
     if run_status:
@@ -1817,7 +1816,7 @@ def list_automation_jobs(
     return [_automation_job_row_to_dict(r) for r in rows], total
 
 
-def claim_next_queued_automation_job(db_path: str) -> Optional[Dict[str, Any]]:
+def claim_next_queued_automation_job(db_path: str) -> dict[str, Any] | None:
     """Atomically move the oldest queued job to ``starting`` and return it."""
     conn = get_conn(db_path)
     conn.execute("BEGIN IMMEDIATE")
@@ -1854,7 +1853,7 @@ def release_automation_job_claim(db_path: str, job_id: str) -> None:
     conn.close()
 
 
-def update_automation_job(db_path: str, job_id: str, **fields) -> Optional[Dict[str, Any]]:
+def update_automation_job(db_path: str, job_id: str, **fields) -> dict[str, Any] | None:
     """Update whitelisted columns; always refreshes ``updated_at``."""
     assignments = []
     params: list[Any] = []
@@ -1878,7 +1877,7 @@ def update_automation_job(db_path: str, job_id: str, **fields) -> Optional[Dict[
     return get_automation_job(db_path, job_id)
 
 
-def request_automation_job_stop(db_path: str, job_id: str) -> Optional[Dict[str, Any]]:
+def request_automation_job_stop(db_path: str, job_id: str) -> dict[str, Any] | None:
     """Record a safe-stop request. Never signals or kills the process.
 
     queued  -> cancelled_before_start (dispatcher never picks it up)
@@ -1922,7 +1921,7 @@ def request_automation_job_stop(db_path: str, job_id: str) -> Optional[Dict[str,
     return job
 
 
-def list_active_automation_jobs(db_path: str) -> List[Dict[str, Any]]:
+def list_active_automation_jobs(db_path: str) -> list[dict[str, Any]]:
     """Jobs in non-terminal states — used by startup recovery."""
     conn = get_conn(db_path)
     rows = conn.execute(
@@ -1945,7 +1944,7 @@ def count_running_automation_jobs(db_path: str) -> int:
 
 
 def replace_automation_job_items(
-    db_path: str, job_id: str, items: List[Dict[str, Any]]
+    db_path: str, job_id: str, items: list[dict[str, Any]]
 ) -> None:
     """Replace the parsed per-brand items of one job (idempotent re-parse)."""
     conn = get_conn(db_path)
@@ -1977,7 +1976,7 @@ def replace_automation_job_items(
     conn.close()
 
 
-def list_automation_job_items(db_path: str, job_id: str) -> List[Dict[str, Any]]:
+def list_automation_job_items(db_path: str, job_id: str) -> list[dict[str, Any]]:
     conn = get_conn(db_path)
     rows = conn.execute(
         "SELECT * FROM automation_job_items WHERE job_id=? ORDER BY id", (job_id,)
@@ -2013,7 +2012,7 @@ def acquire_profile_lock(
     owner_id: str,
     ttl_seconds: float = 120.0,
     pid_alive=None,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
 ) -> bool:
     """Take the profile lock in one transaction.
 
@@ -2067,7 +2066,7 @@ def heartbeat_profile_lock(
     profile_key: str,
     owner_id: str,
     ttl_seconds: float = 120.0,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
 ) -> bool:
     now = now or datetime.now()
     conn = get_conn(db_path)
@@ -2088,7 +2087,7 @@ def heartbeat_profile_lock(
 
 
 def release_profile_lock(
-    db_path: str, profile_key: str, owner_id: Optional[str] = None
+    db_path: str, profile_key: str, owner_id: str | None = None
 ) -> bool:
     conn = get_conn(db_path)
     if owner_id is None:
@@ -2104,7 +2103,7 @@ def release_profile_lock(
     return changed
 
 
-def get_profile_lock(db_path: str, profile_key: str) -> Optional[Dict[str, Any]]:
+def get_profile_lock(db_path: str, profile_key: str) -> dict[str, Any] | None:
     conn = get_conn(db_path)
     row = conn.execute(
         "SELECT * FROM profile_locks WHERE profile_key=?", (profile_key,)
@@ -2113,7 +2112,7 @@ def get_profile_lock(db_path: str, profile_key: str) -> Optional[Dict[str, Any]]
     return dict(row) if row else None
 
 
-def reap_stale_profile_locks(db_path: str, pid_alive, now: Optional[datetime] = None) -> int:
+def reap_stale_profile_locks(db_path: str, pid_alive, now: datetime | None = None) -> int:
     """Delete expired locks whose owner process is verifiably dead."""
     now = now or datetime.now()
     now_text = _lock_time_str(now)
