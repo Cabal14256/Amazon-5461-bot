@@ -1,0 +1,60 @@
+name: Windows CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e ".[dev]"
+      - name: Compile Python
+        run: python -m compileall -q src scripts tests cli
+      - name: Test
+        run: python -m pytest -q -p no:cacheprovider
+      - name: Ruff clean scopes
+        run: >-
+          python -m ruff check
+          src/db.py src/repair src/incidents src/codex_client
+          src/web/api/repair_jobs.py
+          tests/test_repair_runner.py tests/test_repair_release.py
+          tests/test_repair_stage8_db.py tests/test_repair_validation.py
+          tests/test_repair_worktree.py tests/web/test_repair_stage8_api.py
+          tests/web/test_repair_patch_api.py
+      - name: Ruff debt baseline
+        run: python scripts/check_ruff_baseline.py
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Typecheck frontend
+        working-directory: frontend
+        run: npm run typecheck
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
