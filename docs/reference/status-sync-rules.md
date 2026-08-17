@@ -58,6 +58,9 @@
 
 `Case Summary: Answered` 只表示 Amazon 已回复，不能映射为 `approved`。
 Case 回复正文的明确批准也只触发二次验证，不能单独映射为最终 `approved`。
+只有有效 `approved` 和明确 `declined` 会自动结束跟进；`false_approved`、
+`pending`、`verification_pending` 均保留原 Case 并继续定时复查，但全局最多
+自动复查 6 次。第 6 次仍未明确时保留原结果并转 `manual_review`，不再排期。
 
 ---
 

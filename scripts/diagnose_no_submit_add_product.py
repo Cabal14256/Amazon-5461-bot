@@ -200,7 +200,7 @@ def main() -> int:
             statement_text = p.read_text(encoding="utf-8", errors="ignore")
     item_name = extract_item_name(statement_text, brand_name)
 
-    out = ROOT / "evidence" / datetime.now().strftime("%Y-%m-%d") / account_id / brand_name / "no_submit_safety"
+    out = ROOT / "runtime" / "evidence" / datetime.now().strftime("%Y-%m-%d") / account_id / brand_name / "no_submit_safety"
     out.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as pw:

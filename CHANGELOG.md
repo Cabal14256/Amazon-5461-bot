@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-08-16
+
+- Consolidated all active evidence output under `runtime/evidence/` and moved
+  the remaining legacy top-level evidence into that partition without
+  overwriting existing files.
+- Moved the local 5461 source workbook and environment backup into
+  `runtime/private/`; onboarding now prefers the private template location.
+- Grouped historical plans, migration notes, and status references under
+  `docs/plans/`, `docs/migration/`, and `docs/reference/`, with a new
+  `docs/README.md` navigation page.
+- Removed account- and brand-specific historical indexes/examples from the
+  tracked documentation tree and retained them under ignored
+  `migration/private/` paths.
+- Added repository-wide editor and line-ending conventions, expanded generated
+  file ignores, and locked the canonical evidence defaults with a regression
+  test.
+
 ## 2026-08-15
 
 - Hardened the legacy synchronous 5461 helper before publication: submission
@@ -104,7 +121,7 @@
 ### Added
 
 - OpenClaw workspace files: `AGENTS.md`, `TOOLS.md`, and Skill package `skills/amazon-5461-automation/`.
-- Project files: `README.md`, `PROJECT.md`, `CHANGELOG.md`, `pyproject.toml`, and `MIGRATION-NOTES.md`.
+- Project files: `README.md`, `PROJECT.md`, `CHANGELOG.md`, `pyproject.toml`, and `docs/migration/migration-notes.md`.
 - Unified CLI wrapper: `python -m cli.amazon5461`.
 - Runtime directories under `runtime/` for evidence, logs, state, exports, and private config.
 - Private account config examples and `AMAZON5461_ACCOUNTS_PATH` support.

@@ -17,7 +17,7 @@ class ActionRunner:
     Atomic action runner for Playwright page operations.
 
     Usage:
-        runner = ActionRunner(page, registry, evidence_dir="evidence/001")
+        runner = ActionRunner(page, registry, evidence_dir="runtime/evidence/001")
         runner.click("submit_button")
         runner.fill("brand_input", "MyBrand")
         runner.navigate("https://sellercentral.amazon.com/...")

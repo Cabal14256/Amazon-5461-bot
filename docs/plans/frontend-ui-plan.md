@@ -1,6 +1,6 @@
 # 前端 UI 交付记录 — Amazon 5461 内网控制台（2026-08-10）
 
-依据 `docs/plan-internal-console-codex-repair-2026-08-04.md` 的页面规划与状态模型，新增 `frontend/` 纯前端工程。本阶段**只做 UI + Mock 数据**：不触碰 Python 代码、不接真实后端、不启动任何自动化任务。
+依据 `docs/plans/plan-internal-console-codex-repair-2026-08-04.md` 的页面规划与状态模型，新增 `frontend/` 纯前端工程。本阶段**只做 UI + Mock 数据**：不触碰 Python 代码、不接真实后端、不启动任何自动化任务。
 
 ## 技术栈
 

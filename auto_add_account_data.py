@@ -4,7 +4,7 @@
 按账号号段自动适配品牌文案，并在需要时自动补 accounts.json。
 
 能力：
-1. 读取工作区里的 5461信息模版.xlsx
+1. 读取 runtime/private/templates/ 中的 5461信息模版.xlsx
 2. 根据品牌找到模板文案行
 3. 将文案中的账号号段 / SKU 自动替换为目标账号
 4. 回写到 brand_packs/<brand>/docs/ 下
@@ -48,7 +48,8 @@ PICTURE_ROOT = ROOT / "picture"
 CONFIG_DIR = ROOT / "config"
 ACCOUNTS_JSON_PATH = resolve_accounts_path(CONFIG_DIR / "accounts.json")
 SETTINGS_YAML_PATH = CONFIG_DIR / "settings.yaml"
-WORKBOOK_PATH = next(ROOT.glob("5461*.xlsx"), None)
+PRIVATE_TEMPLATE_DIR = ROOT / "runtime" / "private" / "templates"
+WORKBOOK_PATH = next(PRIVATE_TEMPLATE_DIR.glob("5461*.xlsx"), None) or next(ROOT.glob("5461*.xlsx"), None)
 LEGACY_WORKBOOK_PATH = next((ROOT / "_scratch").glob("5461*.xlsx"), None)
 _PROFILE_CACHE: dict[str, Any] = {"loaded": False, "profiles": []}
 
@@ -251,7 +252,7 @@ def detect_template_sheet(wb: openpyxl.Workbook):
 
 def workbook_paths_check() -> Path:
     if WORKBOOK_PATH is None or not WORKBOOK_PATH.exists():
-        raise FileNotFoundError("未找到工作区里的 5461信息模版.xlsx")
+        raise FileNotFoundError("未找到 runtime/private/templates/5461信息模版.xlsx")
     return WORKBOOK_PATH
 
 
@@ -568,7 +569,7 @@ def build_source_payload(brand: str, target_account_num: str, workbook_path: Pat
         "workbook": str(workbook_path.relative_to(ROOT)).replace('\\', '/'),
         "template_account_label": template_account_label,
         "selected_row": selected_row,
-        "note": "文案来自工作区 5461信息模版.xlsx，并将账号号段/SKU 自动替换为目标账号。",
+        "note": "文案来自本地私密模板 5461信息模版.xlsx，并将账号号段/SKU 自动替换为目标账号。",
     }
 
 

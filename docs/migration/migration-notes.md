@@ -29,3 +29,14 @@ Before this Codex migration, the project had been reorganized for an OpenClaw-st
 - an earlier nested project copy was created but later became stale.
 
 That history is retained only for provenance. The current outer Codex repository and its `AGENTS.md`, `PROJECT.md`, and `docs/CURRENT_STATE.md` are authoritative.
+
+## Layout normalization — 2026-08-16
+
+- Consolidated the remaining top-level `evidence/` files into
+  `runtime/evidence/` with no path collisions.
+- Moved the local source workbook and environment backup into
+  `runtime/private/`.
+- Reorganized tracked documentation into `docs/plans/`, `docs/migration/`, and
+  `docs/reference/`.
+- Moved account- or real-brand-specific archive details out of tracked docs and
+  into ignored `migration/private/` storage.

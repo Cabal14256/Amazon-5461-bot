@@ -1,7 +1,7 @@
 # 阶段 6 详细计划：Codex 只读判因（2026-08-11）
 
-> 上位文档：`docs/plan-stages-5-9-implementation-2026-08-11.md`（阶段 6 节）、
-> `docs/plan-internal-console-codex-repair-2026-08-04.md`（§9.6、§16.1 阶段 A、§16.2、§16.4）。
+> 上位文档：`docs/plans/plan-stages-5-9-implementation-2026-08-11.md`（阶段 6 节）、
+> `docs/plans/plan-internal-console-codex-repair-2026-08-04.md`（§9.6、§16.1 阶段 A、§16.2、§16.4）。
 > 基线已核实（2026-08-11）：阶段 5 已落地（`repair_incidents` 表、`src/incidents/`、
 > `POST /api/incidents/{id}/close`、`scripts/replay_incidents.py`、前端修复中心列表）；
 > Codex CLI 已全局安装（codex-cli 0.147.0，`codex exec` 支持 `--json` / `--output-schema` /

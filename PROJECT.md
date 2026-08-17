@@ -35,6 +35,7 @@ runtime/logs/       run logs
 runtime/state/      ledger database and machine state
 runtime/exports/    generated human-readable reports
 runtime/private/    local-only account config and other secrets
+runtime/private/templates/  local-only business workbooks and templates
 runtime/codex_signal.json  local pending-diagnosis handoff (Git-ignored)
 ```
 

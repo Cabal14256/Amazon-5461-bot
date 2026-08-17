@@ -92,7 +92,7 @@ class StateLoopExecutor:
     State-loop executor for Amazon 5461 submission automation.
 
     Usage:
-        executor = StateLoopExecutor(page, brand_data, evidence_root="evidence")
+        executor = StateLoopExecutor(page, brand_data, evidence_root="runtime/evidence")
         result = executor.run()
         # -> {"result": "success", "case_id": "...", "steps": [...], "error": ""}
     """
@@ -100,7 +100,7 @@ class StateLoopExecutor:
     MAX_STEPS = 25
     MAX_RETRIES_PER_STATE = 3
 
-    def __init__(self, page, brand_data: dict, evidence_root: str = "evidence"):
+    def __init__(self, page, brand_data: dict, evidence_root: str = "runtime/evidence"):
         self.page = page
         self.brand_data = brand_data
         self.evidence_root = Path(evidence_root)

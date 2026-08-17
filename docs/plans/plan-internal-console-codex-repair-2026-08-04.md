@@ -1590,7 +1590,7 @@ worktree: runtime/worktrees/repair-<repair_job_id>/
 - `PROJECT.md`：项目允许/禁止动作和运行数据边界。
 - `AGENTS.md`：仓库工作协议、安全边界和验证命令。
 - `docs/CURRENT_STATE.md`：迁移状态、Codex signal 和 Case follow-up 现状。
-- `docs/status-sync-rules.md`：业务状态优先级和标准状态。
+- `docs/reference/status-sync-rules.md`：业务状态优先级和标准状态。
 - `docs/runbooks/runbook-submit-5461.md`：诊断、dry-run 和真实提交流程。
 - `docs/runbooks/runbook-dashboard-check.md`：Dashboard/Selling Applications 复核规则。
 - `docs/runbooks/runbook-case-followup.md`：Case 延迟复核、证据和恢复规则。

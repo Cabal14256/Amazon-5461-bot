@@ -356,11 +356,11 @@ class MonitorSession:
         page,
         account_id: str,
         brand_name: str,
-        evidence_root: str = "evidence",
+        evidence_root: str = "runtime/evidence",
         **kwargs
     ) -> "MonitorSession":
         """
-        工厂方法：自动生成 out_dir = evidence/{date}/{account}/{brand}/monitor/
+        工厂方法：自动生成 out_dir = runtime/evidence/{date}/{account}/{brand}/monitor/
         """
         today = datetime.now().strftime("%Y-%m-%d")
         out_dir = Path(evidence_root) / today / account_id / brand_name / "monitor"

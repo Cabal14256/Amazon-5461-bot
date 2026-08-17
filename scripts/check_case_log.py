@@ -283,7 +283,7 @@ def check_case_log(account_id: str, brand_name: str, site: str = "BE") -> Option
             pass
 
         # 截图留证（超时不阻断）
-        evidence_dir = PROJECT_ROOT / "evidence" / datetime.now().strftime('%Y-%m-%d') / account_id / brand_name / "case_log"
+        evidence_dir = PROJECT_ROOT / "runtime" / "evidence" / datetime.now().strftime('%Y-%m-%d') / account_id / brand_name / "case_log"
         evidence_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime('%H%M%S')
         try:

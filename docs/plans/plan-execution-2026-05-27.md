@@ -245,7 +245,7 @@ ok=11, fail=0
 新增文档：
 
 ```text
-docs/legacy-script-migration-index.md
+docs/migration/legacy-script-migration-index.md
 ```
 
 已标记迁移：
@@ -277,7 +277,7 @@ src/status_sync.py
 新增文档：
 
 ```text
-docs/status-sync-rules.md
+docs/reference/status-sync-rules.md
 ```
 
 规则：
@@ -296,8 +296,8 @@ docs/status-sync-rules.md
 新增：
 
 ```text
-docs/archive-plan-2026-05.json
-docs/archive-plan-2026-05.md
+migration/private/archive-plans/archive-plan-2026-05.json
+docs/migration/archive-plan-2026-05.md
 ```
 
 扫描结果：
@@ -320,7 +320,7 @@ docs/archive-plan-2026-05.md
 新增：
 
 ```text
-docs/plan-execution-2026-05-27.md
+docs/plans/plan-execution-2026-05-27.md
 ```
 
 后续还应同步更新：

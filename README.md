@@ -16,6 +16,7 @@
 - 未取得 Case ID 不代表流程必然失败，应结合 Dashboard、Selling Applications 和最终证据判断。
 
 详细边界请阅读 [`PROJECT.md`](PROJECT.md) 和 [`AGENTS.md`](AGENTS.md)。
+项目文档分类导航见 [`docs/README.md`](docs/README.md)。
 
 ## 环境要求
 
@@ -53,6 +54,7 @@ Copy-Item config\settings.example.yaml config\settings.yaml
 ```
 
 `.env`、`runtime/private/`、运行日志、证据、数据库、品牌包和业务工作簿均属于本地材料，不应上传到代码仓库。
+本地 5461 文案模板统一放在 `runtime/private/templates/`。
 
 ## 项目验证
 
@@ -106,7 +108,7 @@ cli/         统一命令行入口
 .agents/     仓库级 Codex 技能
 config/      非敏感配置模板和选择器
 knowledge/   页面知识、状态和分析提示
-docs/        方案、运行手册和状态规则
+docs/        当前状态、运行手册、方案、迁移和参考文档
 tests/       回归测试
 runtime/     本地运行状态和输出，默认不进入 Git
 legacy/      本地历史脚本和一次性材料，默认不进入 Git

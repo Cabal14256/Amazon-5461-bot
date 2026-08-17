@@ -4,7 +4,8 @@
 
 > 本计划只生成索引，不直接移动/删除文件。正式归档前需确认，避免误移仍在使用的诊断脚本或状态文件。
 
-索引文件：`docs/archive-plan-2026-05.json`
+完整索引含历史账号和品牌文件名，仅保存在 Git 忽略的
+`migration/private/archive-plans/archive-plan-2026-05.json`。
 
 ---
 
@@ -73,7 +74,7 @@ _archive/experiments/2026-05/retry/
 查看明细：
 
 ```bash
-cat docs/archive-plan-2026-05.json
+Get-Content migration/private/archive-plans/archive-plan-2026-05.json
 ```
 
 ---
@@ -93,7 +94,7 @@ cat docs/archive-plan-2026-05.json
 ## 建议执行命令（待确认后再用）
 
 ```powershell
-# 示例：按 docs/archive-plan-2026-05.json 移动文件
+# 示例：按 migration/private/archive-plans/archive-plan-2026-05.json 移动文件
 # 注意：执行前应先人工确认 JSON 内容
 ```
 

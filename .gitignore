@@ -10,6 +10,9 @@ ENV/
 env/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
 .coverage
 htmlcov/
 
@@ -92,3 +95,6 @@ frontend/node_modules/
 frontend/dist/
 !frontend/index.html
 frontend/.ui-check/
+frontend/.vite/
+frontend/playwright-report/
+frontend/test-results/

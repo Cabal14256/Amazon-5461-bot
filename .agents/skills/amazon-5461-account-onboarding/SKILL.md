@@ -11,8 +11,9 @@ Prepare a missing account for a later diagnosis, dry-run, or explicit batch.
 
 1. Work from the repository root and read `AGENTS.md` and `PROJECT.md`.
 2. Keep account configuration only in `runtime/private/accounts.json`; never recreate active accounts in `config/accounts.json`.
-3. Do not print usernames, emails, tokens, cookies, or full account records.
-4. Onboarding authorizes local configuration changes only. It does not authorize a Seller Central submission.
+3. Keep the local 5461 source workbook under `runtime/private/templates/`; do not place business workbooks in the repository root.
+4. Do not print usernames, emails, tokens, cookies, or full account records.
+5. Onboarding authorizes local configuration changes only. It does not authorize a Seller Central submission.
 
 ## Workflow
 

@@ -16,7 +16,7 @@ The old source contains an outdated nested copy at `amazon-5461-bot\amazon-5461-
 - 29 local brand packs under ignored `brand_packs/`
 - Local account configuration under ignored `runtime/private/`
 - Ledger state and current batch data under ignored `runtime/state/` and `data/`
-- Required `5461信息模版.xlsx` as an ignored local workbook
+- Required `5461信息模版.xlsx` under ignored `runtime/private/templates/`
 - Repo-scoped Codex skills under `.agents/skills/`
 
 ## Archived rather than copied into the active tree
@@ -42,6 +42,19 @@ The private export contains 106 project sessions and 12,315 message rows in port
 Twenty-five account-specific, generated, or ephemeral CDP scripts were quarantined under ignored `legacy/scripts-one-off/`. Their original copies remain in the Hermes rollback source.
 
 Forty captured Seller Central example files were moved out of tracked `knowledge/` directories into ignored `migration/private/knowledge-examples/` because they contained account-level page content. Future stuck-state samples are written to ignored `runtime/evidence/error-samples/`. Portable skill references were scrubbed of historical email, AdsPower profile, and Case ID values.
+
+## Repository layout normalization
+
+The 2026-08-16 cleanup made `runtime/evidence/` the only active evidence root.
+The remaining 248 files (45.32 MiB) under the old top-level `evidence/` were
+merged without collisions and without deleting evidence. The onboarding source
+workbook and the retained environment backup now live under ignored
+`runtime/private/` subdirectories.
+
+Tracked documentation is grouped by purpose under `docs/plans/`,
+`docs/migration/`, and `docs/reference/`; `docs/README.md` is the navigation
+entry point. Historical indexes and examples containing account or real-brand
+metadata were retained only under ignored `migration/private/` paths.
 
 ## Current operational policy
 
@@ -143,7 +156,7 @@ missing or ambiguous Case ID.
 ## Read-only web console (plan stage 2)
 
 The internal LAN console from
-`docs/plan-internal-console-codex-repair-2026-08-04.md` stage 2 is implemented
+`docs/plans/plan-internal-console-codex-repair-2026-08-04.md` stage 2 is implemented
 and verified read-only:
 
 - Backend `src/web/` (FastAPI) serves only GET business endpoints plus auth
@@ -235,7 +248,6 @@ Stage 4 (real submission) is implemented on top of the same queue:
   Amazon-side no-op by design. It found no authorization entry and stopped
   `uncertain` with zero ledger side effects. A real submission to a brand that
   actually needs authorization still requires separate explicit authorization.
-
 Stage 5 (persistent incident detection) is implemented:
 
 - Failure signals now persist in the `repair_incidents` table with
@@ -268,7 +280,7 @@ Stage 5 (persistent incident detection) is implemented:
   section 10. Codex triage/patch generation is stage 6-7 scope.
 
 Stage 6 (Codex read-only triage) is implemented
-(`docs/plan-stage-6-triage-2026-08-11.md`):
+(`docs/plans/plan-stage-6-triage-2026-08-11.md`):
 
 - Add Product approval-entry detection accepts any singular/plural count
   (`N restriction(s)` / `N application(s) required`). Incident intake uses
@@ -321,7 +333,7 @@ Stage 6 (Codex read-only triage) is implemented
   worktrees, and release gates remain stage 7-8 scope.
 
 Stage 7 (isolated patch generation) is implemented
-(`docs/plan-stage-7-patch-2026-08-11.md`):
+(`docs/plans/plan-stage-7-patch-2026-08-11.md`):
 
 - `src/repair/worktree.py` creates an isolated git worktree per patch job
   (`<codex.worktree_root>/repair-<job_id>/`, branch

@@ -1,7 +1,7 @@
 # 阶段 7 详细计划：隔离生成补丁（2026-08-11）
 
-> 上位文档：`docs/plan-stages-5-9-implementation-2026-08-11.md`（阶段 7 节）、
-> `docs/plan-internal-console-codex-repair-2026-08-04.md`（§16.1B 启动前提、§16.4 修复提示词、§17 Worktree 流程、§18.1 必须拒绝的 diff）。
+> 上位文档：`docs/plans/plan-stages-5-9-implementation-2026-08-11.md`（阶段 7 节）、
+> `docs/plans/plan-internal-console-codex-repair-2026-08-04.md`（§16.1B 启动前提、§16.4 修复提示词、§17 Worktree 流程、§18.1 必须拒绝的 diff）。
 > 基线已核实（2026-08-11）：阶段 6 已落地并真实联调通过（`src/codex_client/` 子进程管线、
 > `codex_repair_jobs` 表、`POST /api/incidents/{id}/triage`、前端判因卡片、incident `triaged` 状态、
 > 真实 codex exec 判因 incident 98 成功）。`.env`/`data/`/`runtime/`（除 .gitkeep）/`brand_packs/`

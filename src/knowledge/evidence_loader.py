@@ -2,7 +2,7 @@
 证据加载器 -- 加载和管理历史证据包
 
 用法:
-    loader = EvidenceLoader("evidence")
+    loader = EvidenceLoader("runtime/evidence")
     latest = loader.load_latest("us_store_570", "MP-MALL", "01_add_product_start")
     all_evidences = loader.load_all("us_store_570", "MP-MALL")
 """
@@ -18,14 +18,14 @@ class EvidenceLoader:
     证据包加载器。
 
     证据目录结构:
-        evidence/{YYYY-MM-DD}/{account}/{brand}/{node_name}/
+        runtime/evidence/{YYYY-MM-DD}/{account}/{brand}/{node_name}/
             {node_name}_summary.json
             {node_name}_dom_snapshot.json
             {node_name}_page_text.txt
             {node_name}_screenshot.png
     """
 
-    def __init__(self, evidence_root: str = "evidence"):
+    def __init__(self, evidence_root: str = "runtime/evidence"):
         self.evidence_root = Path(evidence_root)
 
     def load_latest(self, account: str, brand: str, node: str) -> Optional[dict]:

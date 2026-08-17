@@ -52,7 +52,7 @@ def test_empty_site_row_reuses_existing_statement(monkeypatch, tmp_path):
         lambda _brand: (
             [{"brand": brand, "country": "BE", "content": "", "sku": ""}],
             "662EU",
-            module.ROOT / "5461信息模版.xlsx",
+            module.ROOT / "runtime" / "private" / "templates" / "5461信息模版.xlsx",
         ),
     )
 
