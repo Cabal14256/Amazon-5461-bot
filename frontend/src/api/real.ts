@@ -18,6 +18,7 @@ import type {
   BusinessStatus,
   CaseFollowUp,
   CaseIdRecovery,
+  EligibleDeclinedCase,
   CatalogAccount,
   GeneratePatchResponse,
   Incident,
@@ -30,6 +31,7 @@ import type {
   LogLine,
   OverviewData,
   ReapplicationCampaign,
+  ReapplicationAuthorizationResult,
   RepairJob,
   RepairJobDetail,
   Site,
@@ -539,6 +541,25 @@ export async function fetchReapplications(status?: string): Promise<Reapplicatio
 export async function fetchReapplication(id: number): Promise<ReapplicationCampaign> {
   const r = await apiFetch<{ reapplication: ReapplicationCampaign }>(`/reapplications/${id}`)
   return r.reapplication
+}
+
+export async function fetchEligibleDeclinedCases(): Promise<EligibleDeclinedCase[]> {
+  const response = await apiFetch<{ eligible_declines: EligibleDeclinedCase[] }>('/reapplications/eligible-declines')
+  return response.eligible_declines
+}
+
+export async function authorizeDeclinedCaseReapplication(
+  sourceCaseFollowupId: number,
+  confirmedRemainingRoute: string[],
+): Promise<ReapplicationAuthorizationResult> {
+  return apiFetch<ReapplicationAuthorizationResult>('/reapplications', {
+    method: 'POST',
+    body: {
+      source_case_followup_id: sourceCaseFollowupId,
+      confirmed_remaining_route: confirmedRemainingRoute,
+      authorize_submit: true,
+    },
+  })
 }
 
 /* ---------- 阶段 5：持久化异常检测 incident 队列 ---------- */

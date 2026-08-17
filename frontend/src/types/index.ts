@@ -217,6 +217,7 @@ export const HUMAN_CLASSIFICATIONS = [
 /** 阶段 5/6/7 incident 状态：open / triaged（阶段 6 Codex 判因成功）/ patching / patch_ready（阶段 7）/ closed_human / closed_duplicate */
 export type IncidentQueueStatus =
   | 'open'
+  | 'waiting_evidence'
   | 'triaged'
   | 'patching'
   | 'patch_ready'
@@ -241,6 +242,9 @@ export interface Incident {
   first_seen_at: string
   last_seen_at: string
   evidence_bundle_path: string | null
+  evidence_status: 'ready' | 'incomplete'
+  missing_evidence: string[]
+  evidence_checked_at: string | null
   resolution_note: string | null
   codex_thread_id: string | null
 }
@@ -262,12 +266,16 @@ export type RepairJobStatus =
   | 'awaiting_validation_approval'
   | 'canary'
   | 'awaiting_release_approval'
+  | 'releasing'
+  | 'release_reconciliation_required'
   | 'release_pending_restart'
   | 'post_release_check'
   | 'release_check_failed'
   | 'released'
   | 'rejected'
   | 'rolled_back'
+  | 'rolling_back'
+  | 'rollback_reconciliation_required'
 
 /** 阶段 7 修改级别（蓝图 §17.3；Codex 自评与后端文件复核取较严者） */
 export type RiskLevel = 'R0' | 'R1' | 'R2' | 'R3'
@@ -392,6 +400,22 @@ export interface RepairJobDetail {
   canary_jobs: RepairCanaryJob[]
   restart_required: boolean
   release_enabled: boolean
+  git_operation: RepairGitOperation | null
+}
+
+export interface RepairGitOperation {
+  id: number
+  repair_job_id: number
+  operation: 'release' | 'rollback'
+  state: 'prepared' | 'git_applied' | 'completed' | 'failed' | 'manual_review'
+  from_status: string
+  expected_head_sha: string
+  target_sha: string
+  result_sha: string | null
+  error_code: string | null
+  created_at: string
+  updated_at: string
+  completed_at: string | null
 }
 
 export interface RepairValidationStep {
@@ -668,9 +692,32 @@ export interface ReapplicationCampaign {
   route: string[]
   current_route_index: number
   status: string
+  source_case_followup_id: number | null
+  source_marketplace: string | null
   stop_reason: string | null
   created_at: string | null
   updated_at: string | null
   completed_at: string | null
   attempts: ReapplicationAttempt[]
+}
+
+export interface EligibleDeclinedCase {
+  id: number
+  account_id: string
+  brand_name: string
+  marketplace: string
+  case_id: string
+  completed_at: string | null
+  region: string
+  route: string[]
+  source_route_index: number
+  remaining_route: string[]
+  next_site: string
+}
+
+export interface ReapplicationAuthorizationResult {
+  reapplication: ReapplicationCampaign
+  created: boolean
+  preflight: Array<{ code: string; ok: boolean; level: string; message: string }>
+  worker: { started: boolean; reason: string | null }
 }

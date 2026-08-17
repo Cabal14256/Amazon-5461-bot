@@ -1,22 +1,54 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { NAlert, NButton, NCard, NEmpty, NIcon, NSpin, NStep, NSteps, NTag, NTooltip } from 'naive-ui'
+import { computed, onMounted, ref } from 'vue'
+import { NAlert, NButton, NCard, NEmpty, NIcon, NModal, NSelect, NSpin, NStep, NSteps, NTag, NTooltip, useMessage } from 'naive-ui'
 import { RefreshOutline } from '@vicons/ionicons5'
-import { getReapplication, getReapplications } from '@/api'
-import type { ReapplicationAttempt, ReapplicationCampaign } from '@/types'
+import { authorizeReapplication, getEligibleDeclinedCases, getReapplication, getReapplications } from '@/api'
+import type { EligibleDeclinedCase, ReapplicationAttempt, ReapplicationCampaign } from '@/types'
 import { attemptTag, campaignTag } from '@/theme/statusColors'
 import StatusTag from '@/components/StatusTag.vue'
 import RelativeTime from '@/components/RelativeTime.vue'
 import { businessResultLabel } from '@/utils/statusLabels'
+import { useAuthStore } from '@/stores/auth'
 
 const campaigns = ref<ReapplicationCampaign[]>([])
 const loading = ref(true)
 const refreshingId = ref<number | null>(null)
+const eligible = ref<EligibleDeclinedCase[]>([])
+const selectedFollowupId = ref<number | null>(null)
+const showAuthorize = ref(false)
+const submitting = ref(false)
+const auth = useAuthStore()
+const message = useMessage()
 
 onMounted(async () => {
   campaigns.value = await getReapplications()
+  if (auth.isReviewerPlus) eligible.value = await getEligibleDeclinedCases()
   loading.value = false
 })
+
+const selectedCandidate = computed(() => eligible.value.find((item) => item.id === selectedFollowupId.value) ?? null)
+const eligibleOptions = computed(() => eligible.value.map((item) => ({
+  label: `${item.brand_name} · ${item.account_id} · ${item.marketplace} · Case ${item.case_id || '—'}`,
+  value: item.id,
+})))
+
+async function submitAuthorization() {
+  const candidate = selectedCandidate.value
+  if (!candidate || submitting.value) return
+  submitting.value = true
+  try {
+    const response = await authorizeReapplication(candidate.id, candidate.remaining_route)
+    message.success(response.created ? '已授权并安排下一站重新申请' : '该 Case 已有关联的重新申请活动')
+    campaigns.value = await getReapplications()
+    eligible.value = await getEligibleDeclinedCases()
+    selectedFollowupId.value = null
+    showAuthorize.value = false
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '授权失败')
+  } finally {
+    submitting.value = false
+  }
+}
 
 /** 单卡刷新：拉取 /api/reapplications/{id} 最新 attempts 进度 */
 async function refreshCampaign(c: ReapplicationCampaign) {
@@ -61,6 +93,9 @@ function isManualReview(a: ReapplicationAttempt): boolean {
         <h1 class="page-title">重新申请</h1>
         <p class="page-subtitle">跨站点路由（如 US → MX）逐个站点重试申请，直到某站通过或全部失败</p>
       </div>
+      <n-button v-if="auth.isReviewerPlus" type="error" style="margin-left: auto" @click="showAuthorize = true">
+        从已拒绝 Case 发起
+      </n-button>
     </div>
 
     <n-spin :show="loading">
@@ -130,6 +165,26 @@ function isManualReview(a: ReapplicationAttempt): boolean {
         </n-card>
       </div>
     </n-spin>
+
+    <n-modal v-model:show="showAuthorize" preset="card" title="授权拒绝后的重新申请" style="width: min(620px, 92vw)">
+      <n-alert type="warning" :bordered="false" style="margin-bottom: 14px">
+        这是一次真实提交授权。确认后，当前明确拒绝记录会保留为来源，后续明确拒绝将自动按固定国家顺序推进。
+      </n-alert>
+      <n-select v-model:value="selectedFollowupId" :options="eligibleOptions" placeholder="选择已完成且明确拒绝的 Case" filterable />
+      <div v-if="selectedCandidate" class="authorization-route">
+        <div>来源：{{ selectedCandidate.marketplace }} / Case {{ selectedCandidate.case_id || '—' }}</div>
+        <strong>剩余路线：{{ selectedCandidate.remaining_route.join(' → ') }}</strong>
+        <small>下一站：{{ selectedCandidate.next_site }}；实际计划时间由后端按“拒绝时间 + 配置延迟”计算。</small>
+      </div>
+      <template #footer>
+        <div class="modal-actions">
+          <n-button @click="showAuthorize = false">取消</n-button>
+          <n-button type="error" :disabled="!selectedCandidate" :loading="submitting" @click="submitAuthorization">
+            确认授权按上述路线提交
+          </n-button>
+        </div>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -219,4 +274,8 @@ function isManualReview(a: ReapplicationAttempt): boolean {
   color: #2080f0;
   opacity: 1;
 }
+
+.authorization-route { margin-top: 16px; padding: 14px; border-radius: 8px; background: rgba(240, 160, 32, 0.1); display: grid; gap: 8px; }
+.authorization-route small { opacity: 0.65; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
 </style>

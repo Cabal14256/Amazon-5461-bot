@@ -2,12 +2,21 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from src.db import claim_due_case_followups, enqueue_case_followup, init_db, list_case_followups
+from src.db import (
+    claim_due_case_followups,
+    enqueue_case_followup,
+    finish_case_followup,
+    init_db,
+    list_case_followups,
+)
 from src.reapplication import (
+    ReapplicationStartError,
     attach_case_followup,
     build_attempt_command,
     claim_due_attempt,
     create_campaign,
+    create_campaign_from_declined_case,
+    declined_case_candidate,
     get_attempt,
     handle_case_outcome,
     list_campaigns,
@@ -40,6 +49,78 @@ def _task(campaign, *, case_id="19999999999"):
         "reapplication_campaign_id": campaign["id"],
         "reapplication_attempt_id": attempt["id"],
     }
+
+
+def _declined_followup(settings, *, site="UK", brand="DEMO_HOME"):
+    db_path = settings["paths"]["db_path"]
+    init_db(db_path)
+    followup_id, _ = enqueue_case_followup(
+        db_path,
+        account_id="us_store_002",
+        marketplace=site,
+        brand_name=brand,
+        case_id="19999999999",
+        submitted_at="2026-08-10 08:00:00",
+        scheduled_at="2026-08-10 09:00:00",
+    )
+    finish_case_followup(
+        db_path,
+        followup_id,
+        "completed",
+        "declined",
+        "declined",
+        "explicit rejection",
+        "runtime/evidence/case.json",
+    )
+    return followup_id
+
+
+def test_declined_case_authorization_preserves_source_and_schedules_next(tmp_path):
+    settings = _settings(tmp_path)
+    followup_id = _declined_followup(settings)
+    candidate = declined_case_candidate(settings, followup_id)
+    assert candidate["remaining_route"] == ["BE", "DE", "SE", "NL", "FR"]
+
+    campaign = create_campaign_from_declined_case(
+        settings,
+        followup_id,
+        confirmed_remaining_route=candidate["remaining_route"],
+        authorize_submit=True,
+    )
+
+    assert campaign["created"] is True
+    assert campaign["current_route_index"] == 1
+    assert [attempt["site"] for attempt in campaign["attempts"]] == ["UK", "BE"]
+    assert campaign["attempts"][0]["status"] == "completed"
+    assert campaign["attempts"][0]["final_result"] == "declined"
+    assert campaign["attempts"][1]["status"] == "scheduled"
+    source = next(row for row in list_case_followups(settings["paths"]["db_path"]) if row["id"] == followup_id)
+    assert source["reapplication_campaign_id"] == campaign["id"]
+
+    repeated = create_campaign_from_declined_case(
+        settings,
+        followup_id,
+        confirmed_remaining_route=candidate["remaining_route"],
+        authorize_submit=True,
+    )
+    assert repeated["created"] is False
+    assert repeated["id"] == campaign["id"]
+
+
+def test_declined_case_authorization_rejects_route_mismatch_and_last_site(tmp_path):
+    settings = _settings(tmp_path)
+    followup_id = _declined_followup(settings)
+    with pytest.raises(ReapplicationStartError, match="route_confirmation_mismatch"):
+        create_campaign_from_declined_case(
+            settings,
+            followup_id,
+            confirmed_remaining_route=["DE", "BE"],
+            authorize_submit=True,
+        )
+
+    mx_followup = _declined_followup(settings, site="MX", brand="DEMO_MX")
+    with pytest.raises(ReapplicationStartError, match="route_exhausted"):
+        declined_case_candidate(settings, mx_followup)
 
 
 def test_declined_advances_eu_route_exactly_two_hours(tmp_path):

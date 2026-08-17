@@ -22,6 +22,8 @@ import {
   fetchOverview,
   fetchReapplication,
   fetchReapplications,
+  fetchEligibleDeclinedCases,
+  authorizeDeclinedCaseReapplication,
   fetchRepairJobDetail,
   fetchRepairJobDiff,
   fetchRepairJobs,
@@ -72,6 +74,8 @@ import type {
   PendingItem,
   PrecheckItem,
   ReapplicationCampaign,
+  EligibleDeclinedCase,
+  ReapplicationAuthorizationResult,
   RepairIncident,
   RepairJob,
   RepairJobDetail,
@@ -256,6 +260,7 @@ export function getRepairJobDetail(jobId: number): Promise<RepairJobDetail> {
     canary_jobs: [],
     restart_required: false,
     release_enabled: false,
+    git_operation: null,
   })
 }
 
@@ -324,6 +329,17 @@ export function getReapplications(status?: string): Promise<ReapplicationCampaig
 
 export function getReapplication(id: number): Promise<ReapplicationCampaign> {
   return fetchReapplication(id)
+}
+
+export function getEligibleDeclinedCases(): Promise<EligibleDeclinedCase[]> {
+  return fetchEligibleDeclinedCases()
+}
+
+export function authorizeReapplication(
+  sourceCaseFollowupId: number,
+  confirmedRemainingRoute: string[],
+): Promise<ReapplicationAuthorizationResult> {
+  return authorizeDeclinedCaseReapplication(sourceCaseFollowupId, confirmedRemainingRoute)
 }
 
 export function getAccounts(): Promise<Account[]> {

@@ -290,6 +290,13 @@ UNTRUSTED 标记）、relevant-selectors、screenshot-withheld（阶段 5 默认
 不提供截图，只记录原图私有路径）。下载走现有 `/api/evidence/file`
 allowlist。
 
+Codex 判因前执行严格完整性门禁：page summary、selector 候选及 probe、
+脱敏 DOM/开放 Shadow DOM contract、同站点同页面族成功 fixture 缺一不可。
+不完整的 incident 标记为 `waiting_evidence`，Web 显示“等待补证”，自动和
+手动判因都不会创建 repair job 或消耗调用额度。可用
+`python scripts/backfill_incident_bundles.py` 先 dry-run 检查历史来源，再用
+`--write` 写入并重新评估门禁。
+
 ### 10.5 回放验证与关闭
 
 - `python scripts/replay_incidents.py`（默认 dry，只打印）对
@@ -335,6 +342,12 @@ baseline、repair 分支 HEAD 等于请求确认的 patch SHA、状态为
 `awaiting_release_approval`。发布仅执行本地 `git merge --no-ff`，不 push、
 不建 PR。合并后状态是 `release_pending_restart`，Web 进程绝不自我重启。
 
+审批时会先在 SQLite 持久化 `releasing` 意图，再持有 `.git/codex-release.lock`
+跨进程锁执行 Git。进程若在 merge/revert 与最终写库之间崩溃，下一次 Web
+启动或 `repair-uat` 会核对 HEAD：严格匹配目标提交则补齐状态，Git 尚未发生
+则恢复审批前状态；其他 HEAD 一律进入 reconciliation-required，禁止自动
+reset、重复 merge 或重复 revert。
+
 重启服务后，用 Admin 调用 `post-release-check`。后端拒绝与合并时相同的
 进程 PID，并再次校验 HEAD/工作树和服务调度器健康，再创建一次 post-release
 `diagnose`。通过才标记 `released`；失败为 `release_check_failed`。
@@ -346,3 +359,26 @@ baseline、repair 分支 HEAD 等于请求确认的 patch SHA、状态为
 使用 `reset --hard`。工作树脏、HEAD 漂移、发布后 Canary 仍运行或无法安全
 revert 时返回 409 并停止。真实补丁 UAT 应保持 `release_enabled=false`，安全
 终点是 `awaiting_release_approval`。
+
+### 11.3 正式 Repair UAT CLI
+
+```powershell
+.\.venv\Scripts\python.exe -m cli.amazon5461 repair-uat --incident-id <id> --check-only
+.\.venv\Scripts\python.exe -m cli.amazon5461 repair-uat --incident-id <id> --json
+```
+
+命令固定先执行数据库迁移、遗留 triage/release 对账、证据完整性、功能开关、
+Codex 可用性、额度与 `release_enabled=false` 检查。`--check-only` 不创建 job；
+默认模式最多执行一次只读判因，不生成补丁、不打开浏览器、不提交申请。
+退出码：0 通过，2 为门禁/业务拒绝，1 为内部或审计失败。
+
+## 12. 何时可以关闭命令行窗口
+
+- 直接在命令行运行的一次性 diagnose/dry-run：只有命令已经退出、任务状态
+  进入 completed/failed 等终态且日志写入完成后，才关闭该窗口。
+- 从 Web 控制台创建的任务：子进程使用隐藏、分离模式。页面已显示
+  completed/failed/cancelled/terminated 等终态并保存日志后，可以关闭普通的
+  启动命令窗口；不要把安静的窗口误当成任务完成。
+- 如果 Web 服务本身以前台方式运行，关闭其窗口会停止 Web 服务，但不会把
+  已分离的任务当作已完成。需要长期运行时使用
+  `scripts/start_web_console_hidden.ps1`。

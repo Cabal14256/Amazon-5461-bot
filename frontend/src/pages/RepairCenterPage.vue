@@ -163,6 +163,7 @@ const canGeneratePatch = computed(
   () =>
     auth.isOperatorPlus &&
     realView.value?.status === 'triaged' &&
+    realView.value?.evidence_status === 'ready' &&
     latestTriage.value?.result?.safe_to_generate_patch === true &&
     !activePatchJob.value,
 )
@@ -175,6 +176,7 @@ const generatePatchDisabledHint = computed(() => {
       : '已有进行中的补丁任务'
   }
   if (realView.value?.status !== 'triaged') return 'incident 需处于「已判因」状态'
+  if (realView.value?.evidence_status !== 'ready') return '证据不完整，需先补证'
   return ''
 })
 
@@ -195,12 +197,16 @@ const PATCH_JOB_STATUS_LABEL: Record<string, string> = {
   awaiting_validation_approval: '等待验证批准',
   canary: 'Canary 验证',
   awaiting_release_approval: '等待发布批准',
+  releasing: '发布事务中',
+  release_reconciliation_required: '发布需人工对账',
   release_pending_restart: '已合并，等待重启',
   post_release_check: '发布后检查中',
   release_check_failed: '发布后检查失败',
   released: '已发布',
   rejected: '已拒绝',
   rolled_back: '已回滚',
+  rolling_back: '回滚事务中',
+  rollback_reconciliation_required: '回滚需人工对账',
 }
 
 function patchJobStatusLabel(status: string): string {
@@ -792,6 +798,9 @@ function reject() {
                 Codex 判因进行中，最长约 120 秒，请稍候…
                 <n-progress type="line" :percentage="100" processing :show-indicator="false" :height="5" style="margin-top: 8px" />
               </n-alert>
+              <n-alert v-if="realView.evidence_status !== 'ready'" type="warning" :bordered="false" style="margin-bottom: 12px">
+                当前为“等待补证”，不会调用 Codex。缺失：{{ realView.missing_evidence.join('、') || '证据门禁尚未重新评估' }}
+              </n-alert>
 
               <n-empty v-if="!latestTriage" description="尚无 Codex 判因结果" size="small" style="margin: 12px 0" />
               <template v-else>
@@ -874,6 +883,7 @@ function reject() {
                   type="primary"
                   secondary
                   :loading="triageRunning"
+                  :disabled="realView.evidence_status !== 'ready'"
                   @click="runTriage"
                 >
                   {{ latestTriage ? '重新判因' : '触发判因' }}
@@ -1067,6 +1077,16 @@ function reject() {
 
               <n-alert v-if="patchJob.restart_required" type="warning" :bordered="false" style="margin-top: 14px">
                 repair 分支已合并，但尚未发布完成。请按 runbook 显式重启 Web 服务，再由 Admin 启动发布后检查。
+              </n-alert>
+              <n-alert
+                v-if="['release_reconciliation_required', 'rollback_reconciliation_required'].includes(patchJob.job.status)"
+                type="error" :bordered="false" style="margin-top: 14px"
+              >
+                Git HEAD 与持久化意图无法严格对应，已停止自动操作。请人工核对，不要重复 merge、revert 或 reset。
+              </n-alert>
+              <n-alert v-if="patchJob.git_operation" type="info" :bordered="false" style="margin-top: 14px">
+                Git 操作 #{{ patchJob.git_operation.id }}：{{ patchJob.git_operation.operation }} / {{ patchJob.git_operation.state }}；
+                expected <code>{{ shortSha(patchJob.git_operation.expected_head_sha) }}</code>，target <code>{{ shortSha(patchJob.git_operation.target_sha) }}</code>
               </n-alert>
               <n-alert v-if="patchJob.job.status === 'awaiting_release_approval' && !patchJob.release_enabled" type="info" :bordered="false" style="margin-top: 14px">
                 当前 release_enabled=false：UAT 已到安全终点，不会合并生产分支。

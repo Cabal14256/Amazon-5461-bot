@@ -40,6 +40,12 @@ ACTIVE_CAMPAIGN_STATUSES = {
 }
 
 
+class ReapplicationStartError(ValueError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
 def _db_path(settings: Mapping[str, Any]) -> str:
     return str((settings.get("paths") or {}).get("db_path") or "./runtime/state/ledger.db")
 
@@ -199,6 +205,211 @@ def create_campaign(
             "scheduled_at": due,
         },
     }
+
+
+def _route_for_site(settings: Mapping[str, Any], site: str) -> tuple[str, tuple[str, ...]]:
+    normalized = str(site or "").strip().upper()
+    matches = [
+        (region, tuple(route))
+        for region, route in get_reapplication_config(settings)["routes"].items()
+        if normalized in route
+    ]
+    if len(matches) != 1:
+        raise ReapplicationStartError("unsupported_source_site")
+    return matches[0]
+
+
+def declined_case_candidate(settings: Mapping[str, Any], followup_id: int) -> dict[str, Any]:
+    """Return a server-derived declined Case start candidate."""
+    config = get_reapplication_config(settings)
+    if not config["enabled"]:
+        raise ReapplicationStartError("reapplication_disabled")
+    db_path = _db_path(settings)
+    init_db(db_path)
+    conn = get_conn(db_path)
+    row = conn.execute(
+        "SELECT * FROM case_followups WHERE id=?", (int(followup_id),)
+    ).fetchone()
+    conn.close()
+    if row is None:
+        raise ReapplicationStartError("case_followup_not_found")
+    case = dict(row)
+    if case.get("status") != "completed" or case.get("final_result") != "declined":
+        raise ReapplicationStartError("case_not_explicitly_declined")
+    region, route = _route_for_site(settings, str(case.get("marketplace") or ""))
+    source_index = route.index(str(case["marketplace"]).upper())
+    if source_index >= len(route) - 1:
+        raise ReapplicationStartError("route_exhausted")
+    return {
+        "id": int(case["id"]),
+        "account_id": str(case["account_id"]),
+        "brand_name": str(case["brand_name"]),
+        "marketplace": str(case["marketplace"]).upper(),
+        "case_id": str(case.get("case_id") or ""),
+        "completed_at": case.get("completed_at"),
+        "last_checked_at": case.get("last_checked_at"),
+        "decision_reason": case.get("decision_reason"),
+        "region": region,
+        "route": list(route),
+        "source_route_index": source_index,
+        "remaining_route": list(route[source_index + 1 :]),
+        "next_site": route[source_index + 1],
+        "reapplication_campaign_id": case.get("reapplication_campaign_id"),
+    }
+
+
+def list_eligible_declined_cases(settings: Mapping[str, Any], limit: int = 100) -> list[dict[str, Any]]:
+    db_path = _db_path(settings)
+    init_db(db_path)
+    conn = get_conn(db_path)
+    rows = conn.execute(
+        """SELECT id FROM case_followups
+           WHERE status='completed' AND final_result='declined'
+           ORDER BY completed_at DESC, id DESC LIMIT ?""",
+        (max(1, min(500, int(limit))),),
+    ).fetchall()
+    conn.close()
+    eligible: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            candidate = declined_case_candidate(settings, int(row["id"]))
+        except ReapplicationStartError:
+            continue
+        if candidate.get("reapplication_campaign_id"):
+            continue
+        eligible.append(candidate)
+    return eligible
+
+
+def create_campaign_from_declined_case(
+    settings: Mapping[str, Any],
+    followup_id: int,
+    *,
+    confirmed_remaining_route: list[str] | tuple[str, ...],
+    authorize_submit: bool,
+) -> dict[str, Any]:
+    """Authorize one declined Case and schedule only its next route site."""
+    if not authorize_submit:
+        raise ReapplicationStartError("submit_authorization_required")
+    candidate = declined_case_candidate(settings, followup_id)
+    confirmed = [str(site).strip().upper() for site in confirmed_remaining_route]
+    if confirmed != candidate["remaining_route"]:
+        raise ReapplicationStartError("route_confirmation_mismatch")
+
+    config = get_reapplication_config(settings)
+    db_path = _db_path(settings)
+    now_dt = datetime.now()
+    declined_at = _parse_datetime(candidate.get("completed_at") or candidate.get("last_checked_at"))
+    due_dt = max(now_dt, declined_at + timedelta(hours=float(config["decline_delay_hours"])))
+    now = now_str()
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        source = conn.execute(
+            """SELECT * FROM case_followups
+               WHERE id=? AND status='completed' AND final_result='declined'""",
+            (int(followup_id),),
+        ).fetchone()
+        if source is None:
+            raise ReapplicationStartError("case_not_explicitly_declined")
+        existing_source = conn.execute(
+            """SELECT * FROM reapplication_campaigns
+               WHERE source_case_followup_id=? ORDER BY id DESC LIMIT 1""",
+            (int(followup_id),),
+        ).fetchone()
+        if existing_source is not None:
+            payload = dict(existing_source)
+            attempts = conn.execute(
+                """SELECT * FROM reapplication_attempts
+                   WHERE campaign_id=? ORDER BY route_index""",
+                (int(existing_source["id"]),),
+            ).fetchall()
+            conn.commit()
+            payload["created"] = False
+            payload["route"] = json.loads(payload.pop("route_json"))
+            payload["attempts"] = [dict(row) for row in attempts]
+            return payload
+        active = conn.execute(
+            """SELECT id FROM reapplication_campaigns
+               WHERE account_id=? AND brand_name=? AND region=?
+                 AND status IN ('scheduled','next_scheduled','running','waiting_case_id',
+                                'waiting_case','paused','blocked')
+               ORDER BY id DESC LIMIT 1""",
+            (candidate["account_id"], candidate["brand_name"], candidate["region"]),
+        ).fetchone()
+        if active is not None:
+            raise ReapplicationStartError("active_campaign_conflict")
+
+        next_index = int(candidate["source_route_index"]) + 1
+        cur = conn.execute(
+            """INSERT INTO reapplication_campaigns(
+                   account_id, brand_name, region, route_json, current_route_index,
+                   status, submit_authorized, decline_delay_hours,
+                   source_case_followup_id, source_marketplace, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?)""",
+            (
+                candidate["account_id"], candidate["brand_name"], candidate["region"],
+                json.dumps(candidate["route"]), next_index,
+                float(config["decline_delay_hours"]), int(followup_id),
+                candidate["marketplace"], now, now,
+            ),
+        )
+        campaign_id = int(cur.lastrowid)
+        source_attempt = conn.execute(
+            """INSERT INTO reapplication_attempts(
+                   campaign_id, route_index, site, status, scheduled_at,
+                   submitted_at, completed_at, case_id, case_followup_id,
+                   final_result, decision_reason, created_at, updated_at)
+               VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, 'declined', ?, ?, ?)""",
+            (
+                campaign_id, int(candidate["source_route_index"]), candidate["marketplace"],
+                str(source["scheduled_at"] or source["submitted_at"] or now),
+                source["submitted_at"], source["completed_at"], source["case_id"],
+                int(followup_id), source["decision_reason"], now, now,
+            ),
+        )
+        source_attempt_id = int(source_attempt.lastrowid)
+        next_attempt = conn.execute(
+            """INSERT INTO reapplication_attempts(
+                   campaign_id, route_index, site, status, scheduled_at, created_at, updated_at)
+               VALUES (?, ?, ?, 'scheduled', ?, ?, ?)""",
+            (
+                campaign_id, next_index, candidate["next_site"],
+                _db_datetime(due_dt), now, now,
+            ),
+        )
+        conn.execute(
+            """UPDATE case_followups
+               SET reapplication_campaign_id=?, reapplication_attempt_id=?, updated_at=?
+               WHERE id=? AND status='completed' AND final_result='declined'""",
+            (campaign_id, source_attempt_id, now, int(followup_id)),
+        )
+        conn.commit()
+        return {
+            "id": campaign_id,
+            "created": True,
+            "account_id": candidate["account_id"],
+            "brand_name": candidate["brand_name"],
+            "region": candidate["region"],
+            "route": candidate["route"],
+            "current_route_index": next_index,
+            "status": "scheduled",
+            "submit_authorized": 1,
+            "decline_delay_hours": float(config["decline_delay_hours"]),
+            "source_case_followup_id": int(followup_id),
+            "source_marketplace": candidate["marketplace"],
+            "created_at": now,
+            "updated_at": now,
+            "attempts": [
+                dict(conn.execute("SELECT * FROM reapplication_attempts WHERE id=?", (source_attempt_id,)).fetchone()),
+                dict(conn.execute("SELECT * FROM reapplication_attempts WHERE id=?", (int(next_attempt.lastrowid),)).fetchone()),
+            ],
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def attach_case_followup(
