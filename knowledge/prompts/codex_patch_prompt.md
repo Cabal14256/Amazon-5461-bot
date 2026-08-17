@@ -33,7 +33,12 @@ The redacted evidence copy for this incident lives in the untracked `.repair-evi
 
 1. Read the evidence and the relevant source. Prefer fixing **shared** selectors / state-recognition logic; account-specific one-off scripts or hardcoded account/brand/profile constants are forbidden.
 2. Make the minimal change that resolves the incident.
-3. Add a **minimal regression test** under `tests/` and run the relevant project tests inside this worktree (e.g. `python -m pytest -q -p no:cacheprovider <relevant test files>`).
+3. Add a **minimal regression/contract test** under `tests/`, plus a de-identified,
+   commit-safe offline fixture under `tests/fixtures/`. Declare the test paths in
+   `tests_added`, the fixture-backed replay tests in `offline_replay_tests`, and
+   fixture files in `offline_fixture_paths`. The replay must not read private
+   runtime files or access the network. Run the relevant project tests inside
+   this worktree (e.g. `python -m pytest -q -p no:cacheprovider <relevant test files>`).
 4. If the root cause turns out to be a **business-semantics change** (Amazon changed what a step means, what is declared, or what is authorized), STOP modifying code and return `requires_human_review=true` with an explanation in `notes`.
 5. Self-assess `risk_level`:
    - `R0` — selector fallback / data-cy / ARIA locator changes

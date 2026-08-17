@@ -71,6 +71,10 @@ export const incidentQueueStatusMeta: Record<string, StatusMeta> = {
   triaged: { label: '已判因', color: '#3b82f6' },
   patching: { label: '补丁生成中', color: '#2080f0', pulse: true },
   patch_ready: { label: '补丁就绪', color: '#8b5cf6' },
+  validating: { label: '验证中', color: '#2080f0', pulse: true },
+  validated: { label: '验证通过', color: '#18a058' },
+  released: { label: '已发布', color: '#18a058' },
+  rejected: { label: '已拒绝', color: '#d03050' },
   closed_human: { label: '人工关闭', color: '#8a919e' },
   closed_duplicate: { label: '重复关闭', color: '#8a919e', dashed: true },
 }
@@ -86,6 +90,16 @@ export const repairJobStatusMeta: Record<RepairJobStatus, StatusMeta> = {
   schema_invalid: { label: '结果格式无效', color: '#d03050' },
   patch_ready: { label: '补丁就绪', color: '#18a058' },
   validation_failed: { label: '校验失败', color: '#d03050' },
+  validating: { label: '自动验证中', color: '#2080f0', pulse: true },
+  awaiting_validation_approval: { label: '等待验证批准', color: '#f0a020' },
+  canary: { label: 'Canary', color: '#8b5cf6', pulse: true },
+  awaiting_release_approval: { label: '等待发布批准', color: '#f0a020' },
+  release_pending_restart: { label: '等待重启', color: '#f0a020', pulse: true },
+  post_release_check: { label: '发布后检查', color: '#2080f0', pulse: true },
+  release_check_failed: { label: '发布检查失败', color: '#d03050' },
+  released: { label: '已发布', color: '#18a058' },
+  rejected: { label: '已拒绝', color: '#d03050' },
+  rolled_back: { label: '已回滚', color: '#8a919e' },
 }
 
 /** 阶段 7 修改级别 R0–R3（蓝图 §17.3；R2 需人工允许，R3 不生成补丁） */

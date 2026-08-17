@@ -27,6 +27,7 @@ from starlette.requests import Request
 from src.codex_client.auto_triage import AutoTriageRunner
 from src.db import init_db
 from src.jobs.manager import JobManager
+from src.repair.runner import RepairWorkflowRunner
 from src.web.api import (
     applications,
     auth,
@@ -62,13 +63,20 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-def create_app(settings: WebSettings | None = None, job_manager: JobManager | None = None) -> FastAPI:
+def create_app(
+    settings: WebSettings | None = None,
+    job_manager: JobManager | None = None,
+    repair_runner: RepairWorkflowRunner | None = None,
+) -> FastAPI:
     settings = settings or load_settings()
     # Idempotent migration: adds web/job tables on existing DBs.
     init_db(str(settings.db_path))
 
     manager = job_manager or JobManager(settings, tick_seconds=settings.job_tick_seconds)
     triage_runner = AutoTriageRunner(settings)
+    workflow_runner = repair_runner or RepairWorkflowRunner(
+        settings, tick_seconds=settings.codex_workflow_poll_seconds
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -83,7 +91,11 @@ def create_app(settings: WebSettings | None = None, job_manager: JobManager | No
         # Stage-6 auto-triage scanner: fully degraded no-op while disabled.
         if settings.codex_enabled and settings.incidents_enabled:
             triage_runner.start()
+        if settings.codex_workflow_enabled and settings.incidents_enabled:
+            workflow_runner.recover()
+            workflow_runner.start()
         yield
+        await workflow_runner.stop()
         await triage_runner.stop()
         # Cancel the dispatch loop only; running child processes keep going
         # and will be reconciled by recover() on the next startup.
@@ -94,6 +106,7 @@ def create_app(settings: WebSettings | None = None, job_manager: JobManager | No
     app.state.rate_limiter = LoginRateLimiter()
     app.state.job_manager = manager
     app.state.triage_runner = triage_runner
+    app.state.repair_runner = workflow_runner
     app.add_middleware(SecurityHeadersMiddleware)
 
     viewer = [Depends(require_role("viewer"))]

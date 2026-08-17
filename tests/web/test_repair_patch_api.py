@@ -48,12 +48,17 @@ def main():
     (worktree / "tests" / "test_selector_regression.py").write_text(
         "def test_selector():\n    assert True\n", encoding="utf-8"
     )
+    fixture = worktree / "tests" / "fixtures" / "selector-regression.html"
+    fixture.parent.mkdir(parents=True, exist_ok=True)
+    fixture.write_text("<button id='submit-fixed'>Submit</button>\n", encoding="utf-8")
     payload = json.dumps({
         "summary": "mock selector patch",
         "changed_files": ["config/selectors/us.yaml", "tests/test_selector_regression.py"],
         "risk_level": "R0",
         "requires_human_review": False,
         "tests_added": ["tests/test_selector_regression.py"],
+        "offline_replay_tests": ["tests/test_selector_regression.py"],
+        "offline_fixture_paths": ["tests/fixtures/selector-regression.html"],
         "tests_ran": True,
         "tests_passed": True,
         "notes": "",
@@ -172,7 +177,8 @@ def test_generate_patch_end_to_end(client, patch_env):
     assert job["risk_level"] == "R0"
     assert job["tests_passed"] == 1
     assert job["changed_files"] == [
-        "config/selectors/us.yaml", "tests/test_selector_regression.py",
+        "config/selectors/us.yaml", "tests/fixtures/selector-regression.html",
+        "tests/test_selector_regression.py",
     ]
     assert job["branch_name"] == f"codex/repair-{incident['id']}-abc123de"
     assert job["baseline_sha"] and job["patch_sha"]

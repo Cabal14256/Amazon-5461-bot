@@ -2,6 +2,16 @@
 
 ## 2026-08-16
 
+- Implement Stage 8 as a persistent validation/approval/Canary/release runner:
+  eight fail-closed gates, PID/heartbeat recovery, Reviewer and Admin APIs,
+  explicit restart confirmation, post-release diagnose, and role-aware repair
+  center controls.
+- Require committed contract tests plus sanitized offline fixtures for new
+  Codex patches, and accept only a schema-constrained read-only diff review
+  with verdict `pass`.
+- Release only through a local clean-tree `git merge --no-ff`; keep the master
+  switch off by default and roll back exclusively with an auditable `git
+  revert` commit. No push or PR is performed.
 - Keep `false_approved`, `pending`, and `verification_pending` Case tasks in
   scheduled follow-up until effective approval, explicit rejection, or the
   global six-check limit; unresolved sixth checks move to manual review and do

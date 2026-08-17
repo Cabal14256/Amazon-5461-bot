@@ -132,10 +132,20 @@ def _net_removed(files: list[FileDiff], keyword: str) -> bool:
     return removed and not added
 
 
+def path_is_allowed(path: str, allowed_paths: tuple[str, ...] | list[str]) -> bool:
+    """Match repository paths on a component boundary, not a raw prefix."""
+    normalized = str(path).replace("\\", "/").strip("/")
+    for raw_prefix in allowed_paths:
+        prefix = str(raw_prefix).replace("\\", "/").strip("/")
+        if prefix and (normalized == prefix or normalized.startswith(prefix + "/")):
+            return True
+    return False
+
+
 def _check_allowed_scope(files: list[FileDiff], allowed_paths: tuple[str, ...]) -> list[Violation]:
     violations = []
     for f in files:
-        if not any(f.path.startswith(prefix) for prefix in allowed_paths):
+        if not path_is_allowed(f.path, allowed_paths):
             violations.append(Violation(
                 "path_outside_allowed",
                 f"changed file outside patch_allowed_paths: {f.path}",
@@ -293,7 +303,7 @@ def classify_file_risk(path: str, allowed_paths: list[str]) -> str:
         return "R3"
     if _R2_PATH_RE.search(path):
         return "R2"
-    if not any(path.startswith(str(prefix)) for prefix in allowed_paths):
+    if not path_is_allowed(path, allowed_paths):
         # Out of scope (also rejected by the scan) — never below R2.
         return "R2"
     if path.startswith("src/"):

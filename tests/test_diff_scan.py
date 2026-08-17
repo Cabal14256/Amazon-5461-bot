@@ -88,6 +88,13 @@ def test_file_outside_allowed_paths_rejected():
     assert "path_outside_allowed" in rule_ids(report)
 
 
+def test_allowed_path_prefix_must_end_on_component_boundary():
+    diff = make_diff("tests_evil/test_bypass.py", added=["def test_bypass():", "    assert True"])
+    report = scan_diff(diff, allowed_paths=ALLOWED)
+    assert not report.passed
+    assert "path_outside_allowed" in rule_ids(report)
+
+
 # ---------------------------------------------------------------------------
 # §18.1 rule 1-2: private paths and sensitive content
 # ---------------------------------------------------------------------------

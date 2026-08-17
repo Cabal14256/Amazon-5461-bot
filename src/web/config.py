@@ -84,6 +84,8 @@ class WebSettings:
     # precedent); canary pins the single canary target for a staged release.
     codex_validation_timeout_sec: int = 900
     codex_diff_review_enabled: bool = True
+    codex_workflow_enabled: bool = True
+    codex_workflow_poll_seconds: float = 2.0
     codex_release_enabled: bool = False
     codex_canary: dict = field(default_factory=dict)
     # Repository root handed to `codex exec -C` (read-only sandbox scope).
@@ -197,6 +199,12 @@ def load_settings(settings_path: Path | None = None) -> WebSettings:
     )
     settings.codex_diff_review_enabled = bool(
         codex.get("diff_review_enabled", settings.codex_diff_review_enabled)
+    )
+    settings.codex_workflow_enabled = bool(
+        codex.get("workflow_enabled", settings.codex_workflow_enabled)
+    )
+    settings.codex_workflow_poll_seconds = float(
+        codex.get("workflow_poll_seconds") or settings.codex_workflow_poll_seconds
     )
     settings.codex_release_enabled = bool(
         codex.get("release_enabled", settings.codex_release_enabled)

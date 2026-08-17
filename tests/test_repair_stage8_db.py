@@ -40,6 +40,9 @@ NEW_ACTIVE_STATUSES = (
     "awaiting_validation_approval",
     "canary",
     "awaiting_release_approval",
+    "release_pending_restart",
+    "post_release_check",
+    "release_check_failed",
 )
 
 
@@ -100,7 +103,17 @@ def test_migration_idempotent(tmp_path):
     approval_cols = {r[1] for r in conn.execute("PRAGMA table_info(repair_approvals)")}
     conn.close()
 
-    for col in ("pre_release_sha", "release_sha", "validation_json_path", "canary_job_ids_json"):
+    for col in (
+        "pre_release_sha",
+        "release_sha",
+        "rollback_sha",
+        "validation_json_path",
+        "validation_pid",
+        "validation_started_at",
+        "validation_heartbeat_at",
+        "canary_job_ids_json",
+        "release_process_pid",
+    ):
         assert col in job_cols
     assert approval_cols == {
         "id", "repair_job_id", "decision", "actor_id", "note", "created_at"

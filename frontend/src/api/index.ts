@@ -2,6 +2,9 @@ import { resolve, USE_MOCK } from './client'
 import { ApiError } from './http'
 import {
   closeIncident as realCloseIncident,
+  approveRepairRelease,
+  approveRepairValidation,
+  confirmRepairCanary,
   createDiagnoseJob,
   createDryRunJob,
   createSubmitJob,
@@ -30,6 +33,9 @@ import {
   postGeneratePatch,
   postTriage,
   requestJobStop,
+  rejectRepair,
+  rollbackRepair,
+  startPostReleaseCheck,
   subscribeJobEvents,
   syncAccounts as realSyncAccounts,
   type AccountSyncResult,
@@ -241,7 +247,16 @@ export function getRepairJobDetail(jobId: number): Promise<RepairJobDetail> {
   if (!USE_MOCK) return fetchRepairJobDetail(jobId)
   const sample = Object.values(mockPatchJobs).find((s) => s.job.id === jobId)
   if (!sample) return Promise.reject(new ApiError(404, 'unknown_job', 'unknown_job'))
-  return resolve({ job: sample.job, result: sample.result })
+  return resolve({
+    job: sample.job,
+    result: sample.result,
+    validation: null,
+    approvals: [],
+    canary: {},
+    canary_jobs: [],
+    restart_required: false,
+    release_enabled: false,
+  })
 }
 
 /** 补丁 diff 原文（viewer+）；Mock 无 diff 落盘的样例返回 404 diff_not_found（与后端一致） */
@@ -251,6 +266,31 @@ export function getRepairJobDiff(jobId: number): Promise<string> {
   if (!sample) return Promise.reject(new ApiError(404, 'unknown_job', 'unknown_job'))
   if (sample.diff == null) return Promise.reject(new ApiError(404, 'diff_not_found', 'diff_not_found'))
   return resolve(sample.diff, 200)
+}
+
+/** Stage-8 actions are real-mode only; Mock keeps its separate demo state machine. */
+export function approveValidation(jobId: number, note = ''): Promise<RepairJob> {
+  return approveRepairValidation(jobId, note)
+}
+
+export function confirmCanary(jobId: number, note: string, evidenceReviewed: boolean): Promise<RepairJob> {
+  return confirmRepairCanary(jobId, note, evidenceReviewed)
+}
+
+export function approveRelease(jobId: number, patchSha: string, note = ''): Promise<RepairJob> {
+  return approveRepairRelease(jobId, patchSha, note)
+}
+
+export function rejectRepairJob(jobId: number, note: string): Promise<RepairJob> {
+  return rejectRepair(jobId, note)
+}
+
+export function postReleaseCheck(jobId: number): Promise<RepairJob> {
+  return startPostReleaseCheck(jobId)
+}
+
+export function rollbackRepairJob(jobId: number, note: string): Promise<RepairJob> {
+  return rollbackRepair(jobId, note)
 }
 
 /** 关闭 incident（operator+）；Mock 把状态置 closed_human 并记录 resolution_note */

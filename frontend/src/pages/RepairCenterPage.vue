@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   NAlert,
   NButton,
   NCard,
+  NCheckbox,
   NDescriptions,
   NDescriptionsItem,
   NEmpty,
@@ -40,8 +41,17 @@ const auth = useAuthStore()
 const mockRole = ref<'Reviewer' | 'Admin'>('Admin')
 const reviewNote = ref('')
 
+let refreshTimer: ReturnType<typeof setInterval> | null = null
 onMounted(() => {
   void store.refresh()
+  if (!USE_MOCK) {
+    refreshTimer = setInterval(() => {
+      if (!store.realLoading && !store.detailLoading) void store.refresh()
+    }, 5000)
+  }
+})
+onBeforeUnmount(() => {
+  if (refreshTimer) clearInterval(refreshTimer)
 })
 
 const incident = computed(() => store.selected)
@@ -137,11 +147,16 @@ async function runTriage() {
 /** 最近一次 stage='patch' job 详情（无补丁任务为 null）与 patch.diff 原文 */
 const patchJob = computed(() => store.realDetail?.patchJob ?? null)
 const patchDiff = computed(() => store.realDetail?.patchDiff ?? null)
+const validation = computed(() => patchJob.value?.validation ?? null)
+const approvals = computed(() => patchJob.value?.approvals ?? [])
+const canaryJobs = computed(() => patchJob.value?.canary_jobs ?? [])
 
 /** 后端唯一索引语义：running / patch_ready 视为 active（就绪补丁在阶段 8 审批前不可重新生成） */
 const activePatchJob = computed(() => {
   const j = patchJob.value?.job
-  return j && (j.status === 'running' || j.status === 'patch_ready') ? j : null
+  return j && !['failed', 'timeout', 'unavailable', 'schema_invalid', 'validation_failed', 'released', 'rejected', 'rolled_back'].includes(j.status)
+    ? j
+    : null
 })
 
 const canGeneratePatch = computed(
@@ -176,6 +191,16 @@ const PATCH_JOB_STATUS_LABEL: Record<string, string> = {
   schema_invalid: '结果格式无效',
   validation_failed: '校验失败',
   patch_ready: '补丁就绪',
+  validating: '自动验证中',
+  awaiting_validation_approval: '等待验证批准',
+  canary: 'Canary 验证',
+  awaiting_release_approval: '等待发布批准',
+  release_pending_restart: '已合并，等待重启',
+  post_release_check: '发布后检查中',
+  release_check_failed: '发布后检查失败',
+  released: '已发布',
+  rejected: '已拒绝',
+  rolled_back: '已回滚',
 }
 
 function patchJobStatusLabel(status: string): string {
@@ -271,6 +296,132 @@ async function runGeneratePatch(allowR2 = false) {
   } finally {
     patchRunning.value = false
   }
+}
+
+/* ---------- 阶段 8：验证审批、Canary、发布、回滚 ---------- */
+
+const stage8Running = ref(false)
+
+function stage8Error(error: unknown) {
+  if (error instanceof ApiError) {
+    const labels: Record<string, string> = {
+      release_disabled: '发布总开关关闭；当前只能完成 UAT，不能合并生产分支',
+      stale_patch_sha: '补丁 SHA 已变化，请刷新后重新核对',
+      dirty_worktree: '生产工作树不干净，已停止发布/回滚',
+      baseline_head_mismatch: '生产 HEAD 已漂移，已停止发布',
+      restart_required: '必须先按 runbook 显式重启 Web 服务',
+      canary_not_ready: 'Canary diagnose / dry-run 尚未全部完成',
+      post_release_check_active: '发布后 Canary 仍在运行，暂不能回滚',
+    }
+    message.error(labels[error.detail] ?? `操作失败：${error.detail}`)
+  } else {
+    message.error('操作失败，请稍后重试')
+  }
+}
+
+async function runStage8(
+  action: 'approve_validation' | 'confirm_canary' | 'approve_release' | 'reject' | 'post_release_check' | 'rollback',
+  options: { note?: string; patchSha?: string; evidenceReviewed?: boolean } = {},
+) {
+  if (stage8Running.value) return
+  stage8Running.value = true
+  try {
+    await store.runStage8Action(action, options)
+    message.success('操作已记录，状态已更新')
+  } catch (error) {
+    stage8Error(error)
+  } finally {
+    stage8Running.value = false
+  }
+}
+
+function approveRealValidation() {
+  dialog.info({
+    title: '批准自动验证结果',
+    content: '确认已核对八步验证摘要与 diff。批准后将按顺序创建 diagnose、dry-run Canary。',
+    positiveText: '批准并进入 Canary',
+    negativeText: '取消',
+    onPositiveClick: () => runStage8('approve_validation'),
+  })
+}
+
+function confirmRealCanary() {
+  const note = ref('')
+  const evidenceReviewed = ref(false)
+  dialog.info({
+    title: '确认 Canary 证据',
+    content: () =>
+      h('div', { style: 'display:grid;gap:10px' }, [
+        h(NInput, {
+          value: note.value,
+          'onUpdate:value': (value: string) => (note.value = value),
+          type: 'textarea',
+          rows: 3,
+          placeholder: '必填：说明已核对的截图、日志和 dry-run 结果',
+        }),
+        h(NCheckbox, {
+          checked: evidenceReviewed.value,
+          'onUpdate:checked': (value: boolean) => (evidenceReviewed.value = value),
+        }, { default: () => '我已核对 Canary 证据，确认未触发 submit 或业务副作用' }),
+      ]),
+    positiveText: '确认并进入发布审批',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      if (!note.value.trim() || !evidenceReviewed.value) {
+        message.warning('请填写证据复核说明并勾选确认')
+        return false
+      }
+      await runStage8('confirm_canary', {
+        note: note.value.trim(),
+        evidenceReviewed: evidenceReviewed.value,
+      })
+    },
+  })
+}
+
+function approveRealRelease() {
+  const sha = patchJob.value?.job.patch_sha
+  if (!sha) return
+  dialog.error({
+    title: '批准本地发布（Admin）',
+    content: `将以 --no-ff 合并已审核 repair 分支，确认补丁 SHA：${sha}。合并后必须显式重启，不会 push 远端。`,
+    positiveText: '确认合并',
+    negativeText: '取消',
+    onPositiveClick: () => runStage8('approve_release', { patchSha: sha }),
+  })
+}
+
+function stage8NoteAction(action: 'reject' | 'rollback') {
+  const note = ref('')
+  dialog.warning({
+    title: action === 'reject' ? '拒绝补丁' : '回滚发布',
+    content: () => h(NInput, {
+      value: note.value,
+      'onUpdate:value': (value: string) => (note.value = value),
+      type: 'textarea',
+      rows: 3,
+      placeholder: '说明（必填，写入审计历史）',
+    }),
+    positiveText: action === 'reject' ? '确认拒绝' : '创建 git revert 回滚提交',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      if (!note.value.trim()) {
+        message.warning('请填写说明')
+        return false
+      }
+      await runStage8(action, { note: note.value.trim() })
+    },
+  })
+}
+
+function runPostReleaseCheck() {
+  dialog.info({
+    title: '启动发布后检查',
+    content: '确认 Web 服务已按 runbook 显式重启。系统将校验 HEAD、服务健康并创建一次 diagnose Canary。',
+    positiveText: '已重启，开始检查',
+    negativeText: '取消',
+    onPositiveClick: () => runStage8('post_release_check'),
+  })
 }
 
 function formatSize(size: number): string {
@@ -844,26 +995,124 @@ function reject() {
                 <DiffViewer :diff="patchDiff" />
               </div>
 
+              <div v-if="validation" style="margin-top: 14px">
+                <div class="action-hint" style="margin-bottom: 8px">八步验证门禁</div>
+                <n-alert
+                  :type="validation.status === 'pass' ? 'success' : validation.status === 'failed' ? 'error' : 'info'"
+                  :bordered="false"
+                  style="margin-bottom: 8px"
+                >
+                  {{ validation.status === 'pass' ? '全部验证通过，等待 Reviewer 批准' : validation.status === 'failed' ? `验证失败：${validation.failure_reason}` : '验证执行中' }}
+                </n-alert>
+                <n-list bordered size="small">
+                  <n-list-item v-for="step in validation.steps" :key="step.name">
+                    <div style="display:flex;justify-content:space-between;gap:12px;width:100%">
+                      <span><code>{{ step.name }}</code></span>
+                      <span class="file-meta">
+                        {{ step.status }} · {{ step.duration_sec }}s
+                        <template v-if="step.exit_code !== null"> · exit {{ step.exit_code }}</template>
+                      </span>
+                    </div>
+                    <div v-if="step.failure_reason" class="action-hint">{{ step.failure_reason }}</div>
+                  </n-list-item>
+                </n-list>
+              </div>
+
+              <div v-if="canaryJobs.length > 0" style="margin-top: 14px">
+                <div class="action-hint" style="margin-bottom: 8px">Canary 任务与证据</div>
+                <n-list bordered size="small">
+                  <n-list-item v-for="row in canaryJobs" :key="row.kind">
+                    <div style="display:flex;justify-content:space-between;gap:12px;width:100%">
+                      <span>{{ row.kind }} · <code>{{ row.job.id }}</code></span>
+                      <StatusTag kind="run" :status="row.job.run_status" size="small" />
+                    </div>
+                    <ul v-if="row.items.length > 0" class="plain-list">
+                      <li v-for="item in row.items" :key="item.id">
+                        {{ item.brand_name }} · {{ item.business_status ?? item.run_status ?? '—' }}
+                      </li>
+                    </ul>
+                    <ul v-if="row.artifacts.length > 0" class="plain-list">
+                      <li v-for="artifact in row.artifacts" :key="`${artifact.root}:${artifact.path}`">
+                        <a :href="bundleUrl(artifact.path)" target="_blank" rel="noopener noreferrer">
+                          {{ artifact.root }} · {{ artifact.path }}
+                        </a>
+                        <span class="file-meta">{{ artifact.type }} · {{ artifact.size }} B</span>
+                      </li>
+                    </ul>
+                    <div v-else class="action-hint">尚无可复核的截图或日志文件</div>
+                  </n-list-item>
+                </n-list>
+              </div>
+
+              <n-descriptions :column="2" label-placement="top" size="small" style="margin-top: 14px">
+                <n-descriptions-item label="发布 SHA">
+                  pre <code>{{ shortSha(patchJob.job.pre_release_sha) }}</code> ·
+                  release <code>{{ shortSha(patchJob.job.release_sha) }}</code> ·
+                  rollback <code>{{ shortSha(patchJob.job.rollback_sha) }}</code>
+                </n-descriptions-item>
+                <n-descriptions-item label="回滚方式">
+                  仅允许 Admin 在干净工作树、HEAD 匹配时创建 <code>git revert</code> 提交；不使用 reset。
+                </n-descriptions-item>
+              </n-descriptions>
+
+              <div v-if="approvals.length > 0" style="margin-top: 14px">
+                <div class="action-hint" style="margin-bottom: 6px">审批历史</div>
+                <ul class="plain-list">
+                  <li v-for="approval in approvals" :key="approval.id">
+                    {{ approval.decision }} · actor #{{ approval.actor_id }} · {{ approval.created_at }}
+                    <template v-if="approval.note"> · {{ approval.note }}</template>
+                  </li>
+                </ul>
+              </div>
+
+              <n-alert v-if="patchJob.restart_required" type="warning" :bordered="false" style="margin-top: 14px">
+                repair 分支已合并，但尚未发布完成。请按 runbook 显式重启 Web 服务，再由 Admin 启动发布后检查。
+              </n-alert>
+              <n-alert v-if="patchJob.job.status === 'awaiting_release_approval' && !patchJob.release_enabled" type="info" :bordered="false" style="margin-top: 14px">
+                当前 release_enabled=false：UAT 已到安全终点，不会合并生产分支。
+              </n-alert>
+
               <div class="action-row" style="margin-top: 14px">
-                <n-tooltip trigger="hover">
-                  <template #trigger>
-                    <n-button disabled>批准验证</n-button>
-                  </template>
-                  阶段 8 开放
-                </n-tooltip>
-                <n-tooltip trigger="hover">
-                  <template #trigger>
-                    <n-button disabled>批准发布</n-button>
-                  </template>
-                  阶段 8 开放
-                </n-tooltip>
-                <n-tooltip trigger="hover">
-                  <template #trigger>
-                    <n-button disabled secondary>拒绝</n-button>
-                  </template>
-                  阶段 8 开放
-                </n-tooltip>
-                <span class="action-hint">验证门禁与人工审批在阶段 8 实现，本阶段仅查看补丁</span>
+                <n-button
+                  v-if="auth.isReviewerPlus && patchJob.job.status === 'awaiting_validation_approval'"
+                  type="primary"
+                  :loading="stage8Running"
+                  @click="approveRealValidation"
+                >批准验证</n-button>
+                <n-button
+                  v-if="auth.isReviewerPlus && patchJob.job.status === 'canary'"
+                  type="primary"
+                  :disabled="!patchJob.canary.ready_for_review"
+                  :loading="stage8Running"
+                  @click="confirmRealCanary"
+                >确认 Canary</n-button>
+                <n-button
+                  v-if="auth.isAdmin && patchJob.job.status === 'awaiting_release_approval'"
+                  type="error"
+                  :disabled="!patchJob.release_enabled"
+                  :loading="stage8Running"
+                  @click="approveRealRelease"
+                >批准发布</n-button>
+                <n-button
+                  v-if="auth.isAdmin && patchJob.job.status === 'release_pending_restart'"
+                  type="primary"
+                  :loading="stage8Running"
+                  @click="runPostReleaseCheck"
+                >发布后检查</n-button>
+                <n-button
+                  v-if="auth.isReviewerPlus && ['awaiting_validation_approval', 'canary', 'awaiting_release_approval'].includes(patchJob.job.status)"
+                  secondary
+                  :loading="stage8Running"
+                  @click="stage8NoteAction('reject')"
+                >拒绝</n-button>
+                <n-button
+                  v-if="auth.isAdmin && ['release_pending_restart', 'post_release_check', 'release_check_failed', 'released'].includes(patchJob.job.status)"
+                  type="error"
+                  secondary
+                  :loading="stage8Running"
+                  @click="stage8NoteAction('rollback')"
+                >回滚</n-button>
+                <span class="action-hint">Reviewer 管验证/Canary，Admin 管发布/回滚；所有操作由后端再次校验角色与状态。</span>
               </div>
             </n-card>
 

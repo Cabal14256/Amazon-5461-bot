@@ -366,13 +366,14 @@ Stage 7 (isolated patch generation) is implemented
 - `src/codex_client/patch.py` reuses the stage-6 subprocess plumbing with
   `-s workspace-write -C <worktree>` and the strict
   `schemas/repair-result-schema.json` (summary / changed_files /
-  risk_level R0–R3 / requires_human_review / tests_added / tests_ran /
-  tests_passed / notes). Startup preconditions (blueprint §16.1B): latest
+  risk_level R0–R3 / requires_human_review / tests_added /
+  offline_replay_tests / offline_fixture_paths / tests_ran / tests_passed /
+  notes). Startup preconditions (blueprint §16.1B): latest
   triage succeeded with a code/selector classification and
   `safe_to_generate_patch=true`, incident `triaged` (never closed), no
-  active patch job — `codex_repair_jobs` gained a partial unique index
-  `UNIQUE(incident_id) WHERE stage='patch' AND status IN
-  ('running','patch_ready','validating')` with same-transaction
+  active patch job — `codex_repair_jobs` has a partial unique index across
+  every active patch, validation, Canary and release-check state, with
+  same-transaction
   check-and-insert (`create_patch_job`, conflict → 409). Schema-invalid
   output is retried exactly once within the same job row (the unique index
   forbids a second active row).
@@ -394,39 +395,43 @@ Stage 7 (isolated patch generation) is implemented
   branch's second commit (`codex: repair incident <id>`, SHA recorded) and
   stored at `runtime/state/repair/<job_id>/patch.diff`; job →
   `patch_ready`, incident `patching → patch_ready`.
-- Incident state machine opens `triaged → patching → patch_ready`; every
-  failure returns to `triaged` (retryable). New job columns
-  `baseline_sha` / `patch_sha`; job status vocabulary adds `patch_ready` /
-  `validation_failed` (`validating` reserved for stage 8).
+- Incident state machine opens `triaged → patching → patch_ready → validating
+  → validated`; validation/Canary failure returns to `triaged` (retryable).
+  Repair jobs persist validation PID/heartbeat, approval/Canary state and
+  release/revert SHAs through the complete Stage-8 lifecycle.
 - API (`src/web/api/repair_jobs.py`): `POST
   /api/incidents/{id}/generate-patch` (operator+, `allow_r2` default
   false; 409 not-triaged/closed/conflict, 422 unsafe/r3, 503 disabled —
   all audited `patch_generate`), `GET /api/repair-jobs/{id}` (viewer+,
-  job + result.json), `GET /api/repair-jobs/{id}/diff` (viewer+,
-  patch.diff text, path reconstructed inside `codex_state_root` only).
-  Approve/release endpoints remain stage 8.
+  job + result/validation/approval/Canary summary), `GET
+  /api/repair-jobs/{id}/diff` (viewer+, patch.diff text, path reconstructed
+  inside `codex_state_root` only), plus Reviewer/Admin Stage-8 approval,
+  rejection, release-check and rollback endpoints.
 - New config (`codex:` section): `patch_timeout_sec` (600),
   `worktree_root`, `worktree_retention_days`, `patch_allowed_paths`
-  (`config/selectors/`, `src/executor/`, `src/capture/`, `tests/`).
+  (`config/selectors/`, `src/executor/`, `src/capture/`, `tests/`), validation
+  timeout/review/runner controls, a local Canary target and the default-off
+  `release_enabled` master switch.
 - Frontend repair center: the "生成补丁" button is live for triaged
   incidents with `safe_to_generate_patch=true` (R2 asks for explicit
   `allow_r2` confirmation; 409 conflict is handled), and a patch section
   shows branch/worktree, risk level, changed files, Codex summary/tests,
-  and the full diff in the existing `DiffViewer`. Approve/reject buttons
-  are disabled placeholders until stage 8.
+  and the full diff in the existing `DiffViewer`. The role-aware Stage-8 panel
+  shows each validation gate, Canary evidence/log artifacts, approval history,
+  release/revert SHAs and only the actions legal for the current state.
 - Evidence-bundle backfill: `scripts/backfill_incident_bundles.py`
   (dry-run default, `--write` to persist) rebuilt bundles for all 183
   replay-created incidents from historical batch-state files
   (state trace + run context; DOM/screenshot artifacts honestly marked
   absent). Known limitation: redaction over-mangles timestamps inside the
   trace (digit runs match the phone pattern) — safe but noisy.
-- Tests: 67 new (worktree lifecycle/dedup/cleanup/private-file exclusion,
+- Stage-7 tests added worktree lifecycle/dedup/cleanup/private-file exclusion,
   §18.1 rule coverage + clean-diff no-false-positive, patch precondition
   branches/timeout/schema-retry/risk strictness, and an end-to-end API
   test where mock Codex edits a real selector in the isolated worktree
   while the fixture production tree's `git status`/HEAD stay byte-identical).
-  Full suite: 327 passed; vue-tsc and vite build green. No merge/release
-  action exists in this stage.
+  Stage-8 tests extend this through validation, approvals, Canary, restart,
+  merge and revert in temporary repositories.
 - Real-Codex patch UAT has no qualifying input yet: re-triaging a backfilled
   historical incident still returns
   `insufficient_evidence` (the trace lacks DOM/selector probes), so no
@@ -437,12 +442,19 @@ Stage 7 (isolated patch generation) is implemented
   from a committed stage 5–7 baseline so the isolated worktree contains all
   repair modules and can execute its in-worktree tests.
 
-## Pre-publication verification (2026-08-15)
+## Stage 8 implementation (2026-08-17)
 
-- The current suite contains 392 tests and passes in full. Frontend
-  `vue-tsc --noEmit` and the Vite production build also pass.
-- Stage 8 has database state/approval helper scaffolding and targeted DB
-  coverage only. Automated validation gates, approval/release endpoints,
-  production merge/revert behavior, and canary release flow are not yet
-  implemented.
+- Stage 8 is implemented with a persistent single-machine validation runner,
+  PID/heartbeat crash recovery, eight fixed validation gates, append-only
+  Reviewer/Admin approval history, resumable diagnose→dry-run Canary, explicit
+  restart confirmation, post-release diagnose, local no-ff merge, and auditable
+  `git revert` rollback. `release_enabled` remains false by default.
+- Repair detail reads now include validation summaries, approval history,
+  Canary jobs/evidence, pre-release/release/rollback SHAs and
+  `restart_required`. The repair-center UI exposes actions strictly by role and
+  state; backend role/status/SHA/switch checks remain authoritative.
+- Unit/integration tests cover idempotent migration, atomic validation claim,
+  dead-PID recovery, fail-closed validation, log redaction, Canary ordering and
+  no-submit job types, approval permission/state guards, temp-repository merge,
+  HEAD drift, dirty worktrees and revert behavior.
 - Stage 9 hardening and the one-week controlled trial have not started.

@@ -627,3 +627,56 @@ export async function fetchRepairJobDetail(jobId: number): Promise<RepairJobDeta
 export async function fetchRepairJobDiff(jobId: number): Promise<string> {
   return apiFetchText(`/repair-jobs/${jobId}/diff`)
 }
+
+/* ---------- 阶段 8：验证审批、Canary、发布与回滚 ---------- */
+
+export async function approveRepairValidation(jobId: number, note = ''): Promise<RepairJob> {
+  const r = await apiFetch<{ job: RepairJob }>(`/repair-jobs/${jobId}/approve-validation`, {
+    method: 'POST',
+    body: { note },
+  })
+  return r.job
+}
+
+export async function confirmRepairCanary(
+  jobId: number,
+  note: string,
+  evidenceReviewed: boolean,
+): Promise<RepairJob> {
+  const r = await apiFetch<{ job: RepairJob }>(`/repair-jobs/${jobId}/confirm-canary`, {
+    method: 'POST',
+    body: { note, evidence_reviewed: evidenceReviewed },
+  })
+  return r.job
+}
+
+export async function approveRepairRelease(jobId: number, patchSha: string, note = ''): Promise<RepairJob> {
+  const r = await apiFetch<{ job: RepairJob }>(`/repair-jobs/${jobId}/approve-release`, {
+    method: 'POST',
+    body: { patch_sha: patchSha, note },
+  })
+  return r.job
+}
+
+export async function rejectRepair(jobId: number, note: string): Promise<RepairJob> {
+  const r = await apiFetch<{ job: RepairJob }>(`/repair-jobs/${jobId}/reject`, {
+    method: 'POST',
+    body: { note },
+  })
+  return r.job
+}
+
+export async function startPostReleaseCheck(jobId: number): Promise<RepairJob> {
+  const r = await apiFetch<{ job: RepairJob }>(`/repair-jobs/${jobId}/post-release-check`, {
+    method: 'POST',
+  })
+  return r.job
+}
+
+export async function rollbackRepair(jobId: number, note: string): Promise<RepairJob> {
+  const r = await apiFetch<{ job: RepairJob }>(`/repair-jobs/${jobId}/rollback`, {
+    method: 'POST',
+    body: { note },
+  })
+  return r.job
+}

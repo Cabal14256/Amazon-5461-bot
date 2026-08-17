@@ -261,7 +261,7 @@ class IncidentCloseRequest(_Model):
 
 
 class RepairJobOut(_Model):
-    """codex_repair_jobs row (stage='triage' in stage 6, 'patch' in stage 7)."""
+    """Public repair-job lifecycle fields (stages 6-8)."""
 
     id: int
     incident_id: int
@@ -277,6 +277,13 @@ class RepairJobOut(_Model):
     tests_passed: int | None = None
     baseline_sha: str | None = None
     patch_sha: str | None = None
+    pre_release_sha: str | None = None
+    release_sha: str | None = None
+    rollback_sha: str | None = None
+    validation_json_path: str | None = None
+    validation_pid: int | None = None
+    validation_started_at: str | None = None
+    validation_heartbeat_at: str | None = None
     created_at: str | None = None
     finished_at: str | None = None
 
@@ -287,3 +294,25 @@ class GeneratePatchRequest(_Model):
     # R2 patches (navigation/form-step semantics) only proceed when the
     # operator explicitly allows them; R3 is never generated.
     allow_r2: bool = False
+
+
+class RepairApprovalRequest(_Model):
+    note: str = ""
+
+
+class CanaryConfirmationRequest(_Model):
+    note: str = ""
+    evidence_reviewed: bool = False
+
+
+class ReleaseApprovalRequest(_Model):
+    patch_sha: str = ""
+    note: str = ""
+
+
+class RepairRejectRequest(_Model):
+    note: str = ""
+
+
+class RepairRollbackRequest(_Model):
+    note: str = ""

@@ -1,7 +1,10 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import {
+  approveRelease,
+  approveValidation,
   closeIncident,
+  confirmCanary,
   generatePatch,
   getIncident,
   getIncidents,
@@ -9,6 +12,9 @@ import {
   getRepairJobDetail,
   getRepairJobDiff,
   getRepairJobs,
+  postReleaseCheck,
+  rejectRepairJob,
+  rollbackRepairJob,
   triageIncident,
 } from '@/api'
 import { ApiError } from '@/api/http'
@@ -174,6 +180,24 @@ export const useIncidentsStore = defineStore('incidents', () => {
     return resp
   }
 
+  async function runStage8Action(
+    action: 'approve_validation' | 'confirm_canary' | 'approve_release' | 'reject' | 'post_release_check' | 'rollback',
+    options: { note?: string; patchSha?: string; evidenceReviewed?: boolean } = {},
+  ): Promise<void> {
+    const incidentId = selectedRealId.value
+    const jobId = realDetail.value?.patchJob?.job.id
+    if (incidentId == null || jobId == null) throw new Error('no_patch_job_selected')
+    if (action === 'approve_validation') await approveValidation(jobId, options.note)
+    else if (action === 'confirm_canary') await confirmCanary(jobId, options.note ?? '', options.evidenceReviewed === true)
+    else if (action === 'approve_release') await approveRelease(jobId, options.patchSha ?? '', options.note)
+    else if (action === 'reject') await rejectRepairJob(jobId, options.note ?? '')
+    else if (action === 'post_release_check') await postReleaseCheck(jobId)
+    else await rollbackRepairJob(jobId, options.note ?? '')
+    await loadRealDetail(incidentId)
+    const fresh = realDetail.value?.incident
+    if (fresh) realIncidents.value = realIncidents.value.map((row) => (row.id === incidentId ? fresh : row))
+  }
+
   /** 双模式入口：Mock 拉流水线演示数据，真实模式拉修复候选类 incident */
   async function refresh() {
     if (!USE_MOCK) {
@@ -209,5 +233,6 @@ export const useIncidentsStore = defineStore('incidents', () => {
     closeSelected,
     triageSelected,
     generatePatchSelected,
+    runStage8Action,
   }
 })

@@ -298,3 +298,51 @@ allowlist。
 - 关闭：`POST /api/incidents/{id}/close`（operator+，必填 note），
   写 `incident_close` 审计；已关闭再关返回 409。前端在"待人工处理"
   分组卡与修复中心详情里操作。
+
+## 11. Stage 8 修复验证与发布
+
+Web 生命周期会启动一个持久 Repair Workflow Runner。它一次只领取一个
+`patch_ready` 补丁，验证子进程 PID、开始时间、心跳和八步结果写入 SQLite
+与 `runtime/state/repair/<job_id>/validation.json`。服务重启时，PID 仍存活的
+验证不重复启动；PID 已失效且没有完成报告的任务才回到 `patch_ready`。
+
+固定八步为：允许路径、diff 私密/安全扫描、`compileall`、全量 pytest、
+修改 Python 文件 Ruff、Codex 声明的 contract tests、脱敏 fixture 离线
+回放、Codex read-only 结构化 diff review。任一步失败都进入
+`validation_failed` 并保留 worktree/日志；只有结构化 `verdict=pass` 才到
+`awaiting_validation_approval`。
+
+审批端点及最低角色：
+
+- `POST /api/repair-jobs/{id}/approve-validation`：Reviewer；进入 Canary。
+- `POST /api/repair-jobs/{id}/confirm-canary`：Reviewer；`note` 非空且
+  `evidence_reviewed=true`。
+- `POST /api/repair-jobs/{id}/approve-release`：Admin；必须回传当前 patch
+  SHA，且 `codex.release_enabled=true`。
+- `POST /api/repair-jobs/{id}/reject`：Reviewer；`note` 必填。
+- `POST /api/repair-jobs/{id}/post-release-check`：Admin；只可在显式重启后调用。
+- `POST /api/repair-jobs/{id}/rollback`：Admin；`note` 必填。
+
+Canary 先检查目标账号/profile、站点、材料、Case/profile/任务冲突，然后只
+按 `diagnose → dry_run` 顺序进入全局串行队列。两项完成后仍停在 `canary`，
+必须人工核对截图、日志和零 submit/零业务副作用，再确认进入
+`awaiting_release_approval`。
+
+### 11.1 本地发布和显式重启
+
+发布前必须同时满足：总开关已开、生产工作树干净、生产 HEAD 等于补丁
+baseline、repair 分支 HEAD 等于请求确认的 patch SHA、状态为
+`awaiting_release_approval`。发布仅执行本地 `git merge --no-ff`，不 push、
+不建 PR。合并后状态是 `release_pending_restart`，Web 进程绝不自我重启。
+
+重启服务后，用 Admin 调用 `post-release-check`。后端拒绝与合并时相同的
+进程 PID，并再次校验 HEAD/工作树和服务调度器健康，再创建一次 post-release
+`diagnose`。通过才标记 `released`；失败为 `release_check_failed`。
+
+### 11.2 安全回滚
+
+回滚要求工作树干净且 HEAD 精确等于记录的 release SHA。系统只创建
+`git revert` 提交（merge commit 使用 mainline 1），记录 rollback SHA；绝不
+使用 `reset --hard`。工作树脏、HEAD 漂移、发布后 Canary 仍运行或无法安全
+revert 时返回 409 并停止。真实补丁 UAT 应保持 `release_enabled=false`，安全
+终点是 `awaiting_release_approval`。

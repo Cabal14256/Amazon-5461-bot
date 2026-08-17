@@ -155,3 +155,34 @@ incidents:
   manual_review_below: 0.60
   # At or above this confidence an incident qualifies for auto-triage (stage 6).
   auto_triage_at_or_above: 0.80
+
+# Stages 6-8: Codex triage, isolated patch generation and gated release.
+codex:
+  enabled: true
+  command: "codex"
+  model: ""
+  timeout_sec: 300
+  auto_triage_min_confidence: 0.60
+  daily_call_limit: 50
+  auto_triage_poll_seconds: 15
+  logs_root: "./runtime/logs/repair"
+  state_root: "./runtime/state/repair"
+  patch_timeout_sec: 600
+  worktree_root: "./runtime/worktrees"
+  worktree_retention_days: 14
+  patch_allowed_paths:
+    - "config/selectors/"
+    - "src/executor/"
+    - "src/capture/"
+    - "tests/"
+  validation_timeout_sec: 900
+  diff_review_enabled: true
+  workflow_enabled: true
+  workflow_poll_seconds: 2
+  # Keep false until an Admin explicitly authorizes a local merge.
+  release_enabled: false
+  # Populate locally; do not place private profile/material data here.
+  canary:
+    account_id: ""
+    marketplace: ""
+    brand_name: ""

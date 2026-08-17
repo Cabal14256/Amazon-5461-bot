@@ -10,6 +10,8 @@
     "risk_level",
     "requires_human_review",
     "tests_added",
+    "offline_replay_tests",
+    "offline_fixture_paths",
     "tests_ran",
     "tests_passed",
     "notes"
@@ -31,6 +33,16 @@
       "type": "boolean"
     },
     "tests_added": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": []
+    },
+    "offline_replay_tests": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": []
+    },
+    "offline_fixture_paths": {
       "type": "array",
       "items": {"type": "string"},
       "default": []

@@ -258,6 +258,16 @@ export type RepairJobStatus =
   | 'schema_invalid'
   | 'patch_ready'
   | 'validation_failed'
+  | 'validating'
+  | 'awaiting_validation_approval'
+  | 'canary'
+  | 'awaiting_release_approval'
+  | 'release_pending_restart'
+  | 'post_release_check'
+  | 'release_check_failed'
+  | 'released'
+  | 'rejected'
+  | 'rolled_back'
 
 /** 阶段 7 修改级别（蓝图 §17.3；Codex 自评与后端文件复核取较严者） */
 export type RiskLevel = 'R0' | 'R1' | 'R2' | 'R3'
@@ -290,6 +300,13 @@ export interface RepairJob {
   tests_passed?: number | null
   baseline_sha?: string | null
   patch_sha?: string | null
+  pre_release_sha?: string | null
+  release_sha?: string | null
+  rollback_sha?: string | null
+  validation_json_path?: string | null
+  validation_pid?: number | null
+  validation_started_at?: string | null
+  validation_heartbeat_at?: string | null
   created_at: string | null
   finished_at: string | null
 }
@@ -330,6 +347,8 @@ export interface PatchResult {
   risk_level: RiskLevel
   requires_human_review: boolean
   tests_added: string[]
+  offline_replay_tests: string[]
+  offline_fixture_paths: string[]
   tests_ran: boolean
   tests_passed: boolean
   notes: string
@@ -367,6 +386,67 @@ export interface GeneratePatchResponse {
 export interface RepairJobDetail {
   job: RepairJob
   result: PatchResult | null
+  validation: RepairValidation | null
+  approvals: RepairApproval[]
+  canary: RepairCanaryState
+  canary_jobs: RepairCanaryJob[]
+  restart_required: boolean
+  release_enabled: boolean
+}
+
+export interface RepairValidationStep {
+  name: string
+  status: 'passed' | 'failed' | 'running' | 'skipped'
+  duration_sec: number
+  exit_code: number | null
+  log_path: string | null
+  failure_reason: string
+  detail: Record<string, unknown>
+}
+
+export interface RepairValidation {
+  version: number
+  job_id: number
+  status: 'running' | 'pass' | 'failed'
+  failure_reason: string
+  started_at?: string | null
+  finished_at?: string | null
+  duration_sec?: number
+  steps: RepairValidationStep[]
+}
+
+export interface RepairApproval {
+  id: number
+  repair_job_id: number
+  decision: 'approve_validation' | 'confirm_canary' | 'approve_release' | 'reject' | 'rollback'
+  actor_id: number
+  note: string | null
+  created_at: string
+}
+
+export interface RepairCanaryState {
+  diagnose?: string
+  dry_run?: string
+  post_release?: string
+  ready_for_review?: boolean
+  failure_reason?: string
+  post_release_result?: string
+  post_release_reason?: string
+  preflight?: { name: string; ok: boolean }[]
+}
+
+export interface RepairCanaryJob {
+  kind: 'diagnose' | 'dry_run' | 'post_release'
+  job: AutomationJob
+  items: AutomationJobItem[]
+  artifacts: RepairCanaryArtifact[]
+}
+
+export interface RepairCanaryArtifact {
+  root: 'evidence' | 'logs'
+  path: string
+  type: 'text' | 'image' | 'binary'
+  size: number
 }
 
 export type HealthLevel = 'ok' | 'warn' | 'down'

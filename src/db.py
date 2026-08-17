@@ -390,8 +390,8 @@ ON repair_incidents(status, classification);
 -- Stage-6 Codex read-only triage jobs (blueprint §9.6 full field set).
 -- Stage-7 fills stage='patch' rows: worktree_path / branch_name /
 -- changed_files_json / risk_level / tests_passed / baseline_sha / patch_sha.
--- Stage-8 adds pre_release_sha / release_sha / validation_json_path /
--- canary_job_ids_json via migration (older DBs).
+-- Stage-8 adds validation process/release/restart bookkeeping via migration
+-- (older DBs).
 -- status: running / succeeded / failed / timeout / unavailable /
 -- quota_exceeded / schema_invalid / patch_ready / validation_failed /
 -- validating / awaiting_validation_approval / canary /
@@ -414,8 +414,13 @@ CREATE TABLE IF NOT EXISTS codex_repair_jobs (
   patch_sha TEXT,
   pre_release_sha TEXT,
   release_sha TEXT,
+  rollback_sha TEXT,
   validation_json_path TEXT,
+  validation_pid INTEGER,
+  validation_started_at TEXT,
+  validation_heartbeat_at TEXT,
   canary_job_ids_json TEXT,
+  release_process_pid INTEGER,
   created_at TEXT NOT NULL,
   finished_at TEXT
 );
@@ -431,12 +436,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_repair_jobs_active_patch
 ON codex_repair_jobs(incident_id)
 WHERE stage='patch' AND status IN (
   'running','patch_ready','validating',
-  'awaiting_validation_approval','canary','awaiting_release_approval'
+  'awaiting_validation_approval','canary','awaiting_release_approval',
+  'release_pending_restart','post_release_check','release_check_failed'
 );
 
 -- Stage-8 human approval trail (validation gate / canary / release).  One
 -- row per decision; decision: approve_validation / confirm_canary /
--- approve_release / reject.  Append-only, never updated.
+-- approve_release / reject / rollback.  Append-only, never updated.
 CREATE TABLE IF NOT EXISTS repair_approvals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   repair_job_id INTEGER NOT NULL,
@@ -490,8 +496,13 @@ def _run_migrations(conn):
     # the columns here.
     _ensure_column(conn, 'codex_repair_jobs', 'pre_release_sha', 'TEXT')
     _ensure_column(conn, 'codex_repair_jobs', 'release_sha', 'TEXT')
+    _ensure_column(conn, 'codex_repair_jobs', 'rollback_sha', 'TEXT')
     _ensure_column(conn, 'codex_repair_jobs', 'validation_json_path', 'TEXT')
+    _ensure_column(conn, 'codex_repair_jobs', 'validation_pid', 'INTEGER')
+    _ensure_column(conn, 'codex_repair_jobs', 'validation_started_at', 'TEXT')
+    _ensure_column(conn, 'codex_repair_jobs', 'validation_heartbeat_at', 'TEXT')
     _ensure_column(conn, 'codex_repair_jobs', 'canary_job_ids_json', 'TEXT')
+    _ensure_column(conn, 'codex_repair_jobs', 'release_process_pid', 'INTEGER')
     # SQLite cannot widen a partial-index predicate in place.  Recreate the
     # active-patch dedup index so the stage-8 gate/canary/release-pending
     # statuses also hold the per-incident exclusive slot (idempotent:
@@ -502,7 +513,8 @@ def _run_migrations(conn):
            ON codex_repair_jobs(incident_id)
            WHERE stage='patch' AND status IN (
              'running','patch_ready','validating',
-             'awaiting_validation_approval','canary','awaiting_release_approval'
+             'awaiting_validation_approval','canary','awaiting_release_approval',
+             'release_pending_restart','post_release_check','release_check_failed'
            )"""
     )
     # Delayed Case tasks may bind to an existing Feishu row.  These columns do
@@ -2385,6 +2397,9 @@ CODEX_JOB_STATUSES = {
     "awaiting_validation_approval",
     "canary",
     "awaiting_release_approval",
+    "release_pending_restart",
+    "post_release_check",
+    "release_check_failed",
     "released",
     "rejected",
     "rolled_back",
@@ -2399,6 +2414,9 @@ CODEX_PATCH_ACTIVE_STATUSES = (
     "awaiting_validation_approval",
     "canary",
     "awaiting_release_approval",
+    "release_pending_restart",
+    "post_release_check",
+    "release_check_failed",
 )
 
 # Jobs in these statuses never reached the Codex API, so they must not count
@@ -2433,8 +2451,13 @@ def _repair_job_row_to_dict(row) -> dict:
         "patch_sha": row["patch_sha"],
         "pre_release_sha": row["pre_release_sha"],
         "release_sha": row["release_sha"],
+        "rollback_sha": row["rollback_sha"],
         "validation_json_path": row["validation_json_path"],
+        "validation_pid": row["validation_pid"],
+        "validation_started_at": row["validation_started_at"],
+        "validation_heartbeat_at": row["validation_heartbeat_at"],
         "canary_job_ids_json": row["canary_job_ids_json"],
+        "release_process_pid": row["release_process_pid"],
         "created_at": str(row["created_at"] or ""),
         "finished_at": row["finished_at"],
     }
@@ -2526,6 +2549,180 @@ def list_repair_jobs(db_path: str, incident_id: int, stage: str | None = None) -
     rows = conn.execute(sql, params).fetchall()
     conn.close()
     return [_repair_job_row_to_dict(r) for r in rows]
+
+
+def list_repair_jobs_by_status(db_path: str, statuses: Iterable[str]) -> list[dict]:
+    """List patch jobs in workflow-runner states, oldest first."""
+    wanted = tuple(str(status) for status in statuses)
+    if not wanted:
+        return []
+    conn = get_conn(db_path)
+    rows = conn.execute(
+        f"""SELECT * FROM codex_repair_jobs
+            WHERE stage='patch' AND status IN ({','.join('?' * len(wanted))})
+            ORDER BY id""",
+        wanted,
+    ).fetchall()
+    conn.close()
+    return [_repair_job_row_to_dict(row) for row in rows]
+
+
+def claim_next_patch_ready_for_validation(db_path: str, claimant_pid: int) -> dict | None:
+    """Atomically claim the oldest patch_ready job and its incident."""
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """SELECT j.id, j.incident_id
+               FROM codex_repair_jobs j
+               JOIN repair_incidents i ON i.id=j.incident_id
+               WHERE j.stage='patch' AND j.status='patch_ready'
+                 AND i.status='patch_ready'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM codex_repair_jobs active
+                   WHERE active.stage='patch' AND active.status='validating'
+                 )
+               ORDER BY j.id LIMIT 1"""
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        timestamp = now_str()
+        job_update = conn.execute(
+            """UPDATE codex_repair_jobs
+               SET status='validating', validation_pid=?,
+                   validation_started_at=?, validation_heartbeat_at=?,
+                   finished_at=NULL
+               WHERE id=? AND status='patch_ready'""",
+            (int(claimant_pid), timestamp, timestamp, int(row["id"])),
+        )
+        incident_update = conn.execute(
+            """UPDATE repair_incidents SET status='validating'
+               WHERE id=? AND status='patch_ready'""",
+            (int(row["incident_id"]),),
+        )
+        if job_update.rowcount != 1 or incident_update.rowcount != 1:
+            conn.rollback()
+            return None
+        claimed = conn.execute(
+            "SELECT * FROM codex_repair_jobs WHERE id=?", (int(row["id"]),)
+        ).fetchone()
+        conn.commit()
+        return _repair_job_row_to_dict(claimed)
+    finally:
+        conn.close()
+
+
+def attach_repair_validation_process(
+    db_path: str,
+    job_id: int,
+    *,
+    pid: int,
+    validation_json_path: str,
+) -> dict | None:
+    """Replace the claim PID with the spawned validation worker PID."""
+    timestamp = now_str()
+    conn = get_conn(db_path)
+    cur = conn.execute(
+        """UPDATE codex_repair_jobs
+           SET validation_pid=?, validation_json_path=?,
+               validation_started_at=COALESCE(validation_started_at, ?),
+               validation_heartbeat_at=?
+           WHERE id=? AND status='validating'""",
+        (int(pid), str(validation_json_path), timestamp, timestamp, int(job_id)),
+    )
+    changed = cur.rowcount == 1
+    conn.commit()
+    conn.close()
+    return get_repair_job(db_path, job_id) if changed else None
+
+
+def heartbeat_repair_validation(db_path: str, job_id: int, pid: int) -> bool:
+    conn = get_conn(db_path)
+    cur = conn.execute(
+        """UPDATE codex_repair_jobs SET validation_heartbeat_at=?
+           WHERE id=? AND status='validating' AND validation_pid=?""",
+        (now_str(), int(job_id), int(pid)),
+    )
+    changed = cur.rowcount == 1
+    conn.commit()
+    conn.close()
+    return changed
+
+
+def requeue_stale_repair_validation(db_path: str, job_id: int) -> dict | None:
+    """Return a dead validating worker to patch_ready without losing artifacts."""
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT incident_id FROM codex_repair_jobs WHERE id=? AND status='validating'",
+            (int(job_id),),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        conn.execute(
+            """UPDATE codex_repair_jobs
+               SET status='patch_ready', validation_pid=NULL,
+                   validation_started_at=NULL, validation_heartbeat_at=NULL,
+                   finished_at=NULL
+               WHERE id=? AND status='validating'""",
+            (int(job_id),),
+        )
+        conn.execute(
+            """UPDATE repair_incidents SET status='patch_ready'
+               WHERE id=? AND status='validating'""",
+            (int(row["incident_id"]),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_repair_job(db_path, job_id)
+
+
+def finish_repair_validation(
+    db_path: str,
+    job_id: int,
+    *,
+    passed: bool,
+    validation_json_path: str,
+) -> dict | None:
+    """Atomically finish validation and update the incident lifecycle."""
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT incident_id FROM codex_repair_jobs WHERE id=? AND status='validating'",
+            (int(job_id),),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        job_status = "awaiting_validation_approval" if passed else "validation_failed"
+        incident_status = "validated" if passed else "triaged"
+        conn.execute(
+            """UPDATE codex_repair_jobs
+               SET status=?, validation_json_path=?, validation_pid=NULL,
+                   validation_heartbeat_at=?, finished_at=?
+               WHERE id=? AND status='validating'""",
+            (
+                job_status,
+                str(validation_json_path),
+                now_str(),
+                now_str(),
+                int(job_id),
+            ),
+        )
+        conn.execute(
+            """UPDATE repair_incidents SET status=?
+               WHERE id=? AND status='validating'""",
+            (incident_status, int(row["incident_id"])),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_repair_job(db_path, job_id)
 
 
 def count_triage_jobs_today(db_path: str) -> int:
@@ -2690,6 +2887,7 @@ REPAIR_APPROVAL_DECISIONS = {
     "confirm_canary",
     "approve_release",
     "reject",
+    "rollback",
 }
 
 
@@ -2733,6 +2931,64 @@ def list_approvals(db_path: str, repair_job_id: int) -> list[dict]:
     ]
 
 
+def record_approval_transition(
+    db_path: str,
+    *,
+    repair_job_id: int,
+    decision: str,
+    actor_id: int,
+    from_status: str,
+    to_status: str,
+    note: str | None = None,
+    extra_cols: dict | None = None,
+) -> dict | None:
+    """Append approval and change status in one transaction.
+
+    A repeated/stale request changes nothing and returns ``None``.
+    """
+    if decision not in REPAIR_APPROVAL_DECISIONS:
+        raise ValueError(f"unknown approval decision: {decision!r}")
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status FROM codex_repair_jobs WHERE id=?", (int(repair_job_id),)
+        ).fetchone()
+        if row is None or str(row["status"]) != str(from_status):
+            conn.rollback()
+            return None
+        assignments = ["status=?"]
+        params: list[Any] = [str(to_status)]
+        for column, value in (extra_cols or {}).items():
+            assignments.append(f"{column}=?")
+            params.append(value)
+        params.extend((int(repair_job_id), str(from_status)))
+        cur = conn.execute(
+            f"""UPDATE codex_repair_jobs SET {', '.join(assignments)}
+                WHERE id=? AND status=?""",
+            params,
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.execute(
+            """INSERT INTO repair_approvals(
+                   repair_job_id, decision, actor_id, note, created_at
+               ) VALUES (?, ?, ?, ?, ?)""",
+            (
+                int(repair_job_id),
+                str(decision),
+                int(actor_id),
+                str(note) if note is not None else None,
+                now_str(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_repair_job(db_path, repair_job_id)
+
+
 def set_repair_job_status(db_path: str, job_id: int, *,
                           from_statuses: tuple | list, to_status: str,
                           extra_cols: dict | None = None) -> dict | None:
@@ -2761,6 +3017,196 @@ def set_repair_job_status(db_path: str, job_id: int, *,
     conn.close()
     if not changed:
         return None
+    return get_repair_job(db_path, job_id)
+
+
+def _parse_canary_state(raw: object) -> dict:
+    try:
+        payload = json.loads(str(raw or "{}"))
+    except ValueError:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def update_repair_canary_state(
+    db_path: str,
+    job_id: int,
+    *,
+    expected_status: str,
+    values: dict,
+) -> dict | None:
+    """Merge non-secret orchestration metadata into canary_job_ids_json."""
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT canary_job_ids_json FROM codex_repair_jobs WHERE id=? AND status=?",
+            (int(job_id), str(expected_status)),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        state = _parse_canary_state(row["canary_job_ids_json"])
+        state.update(values)
+        conn.execute(
+            "UPDATE codex_repair_jobs SET canary_job_ids_json=? WHERE id=? AND status=?",
+            (
+                json.dumps(state, ensure_ascii=False, sort_keys=True),
+                int(job_id),
+                str(expected_status),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_repair_job(db_path, job_id)
+
+
+def create_repair_canary_job(
+    db_path: str,
+    repair_job_id: int,
+    *,
+    kind: str,
+    automation_job_id: str,
+    created_by: str,
+    account_id: str,
+    marketplace: str,
+    brand_name: str,
+) -> str | None:
+    """Atomically create one diagnose/dry-run job and bind it to a repair job.
+
+    Returning an existing id makes restart recovery idempotent.  The queue row
+    and binding JSON are committed together, so a crash cannot orphan a job
+    and cause a duplicate on the next tick.
+    """
+    slot_by_kind = {
+        "diagnose": ("canary", "diagnose", "diagnose"),
+        "dry_run": ("canary", "dry_run", "dry_run"),
+        "post_release": ("post_release_check", "post_release", "diagnose"),
+    }
+    if kind not in slot_by_kind:
+        raise ValueError(f"unknown repair canary kind: {kind!r}")
+    expected_status, slot, job_type = slot_by_kind[kind]
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """SELECT canary_job_ids_json FROM codex_repair_jobs
+               WHERE id=? AND status=?""",
+            (int(repair_job_id), expected_status),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        state = _parse_canary_state(row["canary_job_ids_json"])
+        existing = str(state.get(slot) or "").strip()
+        if existing:
+            conn.rollback()
+            return existing
+        timestamp = now_str()
+        conn.execute(
+            """INSERT INTO automation_jobs(
+                   id, job_type, run_status, created_by, account_id,
+                   marketplace, brands_json, created_at, updated_at
+               ) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?)""",
+            (
+                str(automation_job_id),
+                job_type,
+                str(created_by),
+                str(account_id),
+                str(marketplace),
+                json.dumps([str(brand_name)], ensure_ascii=False),
+                timestamp,
+                timestamp,
+            ),
+        )
+        state[slot] = str(automation_job_id)
+        conn.execute(
+            "UPDATE codex_repair_jobs SET canary_job_ids_json=? WHERE id=?",
+            (json.dumps(state, ensure_ascii=False, sort_keys=True), int(repair_job_id)),
+        )
+        conn.commit()
+        return str(automation_job_id)
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
+def fail_repair_canary(db_path: str, job_id: int, reason: str) -> dict | None:
+    """Close a failed pre-release canary and make the incident retryable."""
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT incident_id, canary_job_ids_json FROM codex_repair_jobs WHERE id=? AND status='canary'",
+            (int(job_id),),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        state = _parse_canary_state(row["canary_job_ids_json"])
+        state["failure_reason"] = str(reason)[:300]
+        conn.execute(
+            """UPDATE codex_repair_jobs
+               SET status='validation_failed', canary_job_ids_json=?, finished_at=?
+               WHERE id=? AND status='canary'""",
+            (
+                json.dumps(state, ensure_ascii=False, sort_keys=True),
+                now_str(),
+                int(job_id),
+            ),
+        )
+        conn.execute(
+            """UPDATE repair_incidents SET status='triaged'
+               WHERE id=? AND status='validated'""",
+            (int(row["incident_id"]),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_repair_job(db_path, job_id)
+
+
+def finish_post_release_check(db_path: str, job_id: int, *, passed: bool,
+                              reason: str = "") -> dict | None:
+    """Finish the post-release diagnose and update incident status on pass."""
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT incident_id, canary_job_ids_json FROM codex_repair_jobs WHERE id=? AND status='post_release_check'",
+            (int(job_id),),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        state = _parse_canary_state(row["canary_job_ids_json"])
+        state["post_release_result"] = "passed" if passed else "failed"
+        if reason:
+            state["post_release_reason"] = str(reason)[:300]
+        target_status = "released" if passed else "release_check_failed"
+        conn.execute(
+            """UPDATE codex_repair_jobs
+               SET status=?, canary_job_ids_json=?, finished_at=?
+               WHERE id=? AND status='post_release_check'""",
+            (
+                target_status,
+                json.dumps(state, ensure_ascii=False, sort_keys=True),
+                now_str(),
+                int(job_id),
+            ),
+        )
+        if passed:
+            conn.execute(
+                """UPDATE repair_incidents SET status='released'
+                   WHERE id=? AND status='validated'""",
+                (int(row["incident_id"]),),
+            )
+        conn.commit()
+    finally:
+        conn.close()
     return get_repair_job(db_path, job_id)
 
 
@@ -2807,6 +3253,20 @@ def mark_incident_released(db_path: str, incident_id: int) -> dict | None:
     if not changed:
         return None
     return get_incident(db_path, incident_id)
+
+
+def mark_incident_rolled_back(db_path: str, incident_id: int) -> dict | None:
+    """released/validated -> triaged after an audited git revert."""
+    conn = get_conn(db_path)
+    cur = conn.execute(
+        """UPDATE repair_incidents SET status='triaged'
+           WHERE id=? AND status IN ('released', 'validated')""",
+        (int(incident_id),),
+    )
+    changed = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return get_incident(db_path, incident_id) if changed else None
 
 
 def mark_incident_rejected(db_path: str, incident_id: int) -> dict | None:
