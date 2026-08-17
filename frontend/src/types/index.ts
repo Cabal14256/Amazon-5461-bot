@@ -98,6 +98,7 @@ export interface JobSummary {
   brandSucceeded: number
   brandFailed: number
   createdAt: string
+  updatedAt: string
   startedAt: string | null
   finishedAt: string | null
   stopReason: string | null

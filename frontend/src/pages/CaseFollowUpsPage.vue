@@ -9,6 +9,7 @@ import { attemptTag } from '@/theme/statusColors'
 import StatusTag from '@/components/StatusTag.vue'
 import RelativeTime from '@/components/RelativeTime.vue'
 import { businessResultLabel } from '@/utils/statusLabels'
+import { caseExpandedDetails, serverTimeMillis } from '@/utils/tableSemantics'
 
 const items = ref<CaseFollowUp[]>([])
 const loading = ref(true)
@@ -29,17 +30,12 @@ async function load() {
 onMounted(load)
 
 function detail(row: CaseFollowUp) {
-  const timeline = [
-    row.submitted_at ? `提交：${row.submitted_at}` : null,
-    row.scheduled_at ? `计划：${row.scheduled_at}` : null,
-    row.last_checked_at ? `上次检查：${row.last_checked_at}` : null,
-    row.completed_at ? `完成：${row.completed_at}` : null,
-  ].filter(Boolean)
+  const expanded = caseExpandedDetails(row)
   return h('div', { class: 'case-detail' }, [
-    row.decision_reason ? h('p', [h('strong', '判定：'), row.decision_reason]) : null,
-    row.error ? h(NAlert, { type: 'error', bordered: false }, { default: () => row.error }) : null,
-    row.evidence_path ? h('p', [h('strong', '证据：'), h('code', row.evidence_path)]) : null,
-    h('p', { class: 'timeline' }, timeline.join('　·　') || '暂无时间线'),
+    expanded.decision ? h('p', [h('strong', '判定：'), expanded.decision]) : null,
+    expanded.error ? h(NAlert, { type: 'error', bordered: false }, { default: () => expanded.error }) : null,
+    expanded.evidence ? h('p', [h('strong', '证据：'), h('code', expanded.evidence)]) : null,
+    h('p', { class: 'timeline' }, expanded.timeline.join('　·　') || '暂无时间线'),
   ])
 }
 
@@ -58,7 +54,7 @@ const columns: DataTableColumns<CaseFollowUp> = [
   { title: '最终结果', key: 'final_result', width: 125, render: (row) => businessResultLabel(row.final_result || '') || '—' },
   {
     title: '计划 / 最近检查', key: 'scheduled_at', width: 145,
-    sorter: (a, b) => Date.parse(a.scheduled_at || '') - Date.parse(b.scheduled_at || ''),
+    sorter: (a, b) => serverTimeMillis(a.scheduled_at) - serverTimeMillis(b.scheduled_at),
     render: (row) => h(RelativeTime, { time: row.last_checked_at ?? row.scheduled_at ?? row.submitted_at ?? '' }),
   },
 ]

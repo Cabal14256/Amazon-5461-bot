@@ -8,6 +8,7 @@ import { useJobsStore } from '@/stores/jobs'
 import type { JobMode, JobRunStatus, JobSummary, JobType } from '@/types'
 import StatusTag from '@/components/StatusTag.vue'
 import RelativeTime from '@/components/RelativeTime.vue'
+import { jobDetailPath, jobExecutionSummary, serverTimeMillis } from '@/utils/tableSemantics'
 
 const jobsStore = useJobsStore()
 const route = useRoute()
@@ -57,7 +58,7 @@ const columns: DataTableColumns<JobSummary> = [
   { title: '任务 ID', key: 'id', width: 185, ellipsis: { tooltip: true }, render: (row) => h('code', row.id) },
   { title: '账号', key: 'accountLabel', width: 110, sorter: (a, b) => a.accountLabel.localeCompare(b.accountLabel) },
   { title: '站点', key: 'site', width: 72 },
-  { title: '品牌结果', key: 'brandTotal', width: 150, render: (row) => `${row.brandSucceeded} 成 / ${row.brandFailed} 败 / 共 ${row.brandTotal}` },
+  { title: '品牌执行', key: 'brandTotal', width: 220, render: jobExecutionSummary },
   {
     title: '运行状态', key: 'status', width: 205,
     render: (row) => h('div', { class: 'status-cell' }, [
@@ -73,14 +74,14 @@ const columns: DataTableColumns<JobSummary> = [
     }),
   },
   {
-    title: '更新时间', key: 'updated', width: 125,
-    sorter: (a, b) => Date.parse(a.finishedAt ?? a.startedAt ?? a.createdAt) - Date.parse(b.finishedAt ?? b.startedAt ?? b.createdAt),
-    render: (row) => h(RelativeTime, { time: row.finishedAt ?? row.startedAt ?? row.createdAt }),
+    title: '更新时间', key: 'updatedAt', width: 125,
+    sorter: (a, b) => serverTimeMillis(a.updatedAt) - serverTimeMillis(b.updatedAt),
+    render: (row) => h(RelativeTime, { time: row.updatedAt }),
   },
   {
     title: '操作', key: 'action', width: 80, fixed: 'right',
     render: (row) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: (event: Event) => {
-      event.stopPropagation(); void router.push(`/jobs/${row.id}`)
+      event.stopPropagation(); void router.push(jobDetailPath(row.id))
     } }, { default: () => '详情' }),
   },
 ]
@@ -112,7 +113,7 @@ watch([statusFilter, modeFilter, accountFilter], () => { pagination.page = 1 })
     <n-data-table
       :columns="columns" :data="filtered" :loading="jobsStore.loading" :pagination="pagination"
       :row-key="(row: JobSummary) => row.id" striped :scroll-x="1220"
-      :row-props="(row: JobSummary) => ({ class: 'clickable-row', onClick: () => router.push(`/jobs/${row.id}`) })"
+      :row-props="(row: JobSummary) => ({ class: 'clickable-row', onClick: () => router.push(jobDetailPath(row.id)) })"
     />
   </div>
 </template>

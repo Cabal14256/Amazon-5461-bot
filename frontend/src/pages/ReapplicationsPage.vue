@@ -9,6 +9,7 @@ import StatusTag from '@/components/StatusTag.vue'
 import RelativeTime from '@/components/RelativeTime.vue'
 import { businessResultLabel } from '@/utils/statusLabels'
 import { useAuthStore } from '@/stores/auth'
+import { reapplicationAuthorizationMessage } from '@/utils/tableSemantics'
 
 const campaigns = ref<ReapplicationCampaign[]>([])
 const loading = ref(true)
@@ -38,7 +39,7 @@ async function submitAuthorization() {
   submitting.value = true
   try {
     const response = await authorizeReapplication(candidate.id, candidate.remaining_route)
-    message.success(response.created ? '已授权并安排下一站重新申请' : '该 Case 已有关联的重新申请活动')
+    message.success(reapplicationAuthorizationMessage(response.created))
     campaigns.value = await getReapplications()
     eligible.value = await getEligibleDeclinedCases()
     selectedFollowupId.value = null

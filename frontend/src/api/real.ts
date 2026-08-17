@@ -304,7 +304,7 @@ export function mapAutomationJob(j: AutomationJob, items?: AutomationJobItem[]):
 
   return {
     id: j.id,
-    type: 'unknown',
+    type: 'apply_5461',
     mode,
     accountId: j.account_id,
     accountLabel: j.account_id,
@@ -315,6 +315,7 @@ export function mapAutomationJob(j: AutomationJob, items?: AutomationJobItem[]):
     brandSucceeded,
     brandFailed,
     createdAt: j.created_at ?? '',
+    updatedAt: j.updated_at ?? j.finished_at ?? j.started_at ?? j.created_at ?? '',
     startedAt: j.started_at,
     finishedAt: j.finished_at,
     stopReason: j.stop_requested_at ? STOP_REQUESTED_HINT : null,

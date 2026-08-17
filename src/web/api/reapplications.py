@@ -14,6 +14,7 @@ from src.reapplication import (
     ReapplicationStartError,
     create_campaign_from_declined_case,
     declined_case_candidate,
+    get_campaign_by_source_case,
     launch_reapplication_worker,
     list_eligible_declined_cases,
 )
@@ -119,6 +120,26 @@ def authorize_reapplication(
     settings = get_settings(request)
     runtime_settings = _runtime_settings(settings)
     followup_id = int(body.source_case_followup_id)
+    if not body.authorize_submit:
+        _audit(request, user, followup_id, "rejected:submit_authorization_required")
+        raise HTTPException(status_code=422, detail="submit_authorization_required")
+
+    existing = get_campaign_by_source_case(runtime_settings, followup_id)
+    if existing is not None:
+        attempts = existing.get("attempts") or []
+        _audit(
+            request,
+            user,
+            followup_id,
+            "idempotent_existing",
+            {"campaign_id": existing["id"], "route": existing.get("route") or []},
+        )
+        return {
+            "reapplication": _campaign_to_out(existing, attempts),
+            "created": False,
+            "preflight": [],
+            "worker": {"started": False, "reason": "existing_campaign"},
+        }
     try:
         candidate = declined_case_candidate(runtime_settings, followup_id)
         account, brands, site = _validate_job_request(

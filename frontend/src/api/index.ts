@@ -115,7 +115,7 @@ export function getJob(id: string): Promise<JobDetail | null> {
       started_at: mock.startedAt,
       finished_at: mock.finishedAt,
       created_at: mock.createdAt,
-      updated_at: mock.createdAt,
+      updated_at: mock.updatedAt,
     }
     return resolve({ ...mock, raw, items: [] })
   }
@@ -447,6 +447,7 @@ export function createSubmit(payload: NewJobPayload): Promise<SubmitJobResponse>
     brandSucceeded: 0,
     brandFailed: 0,
     createdAt: now,
+    updatedAt: now,
     startedAt: null,
     finishedAt: null,
     stopReason: null,

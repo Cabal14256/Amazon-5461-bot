@@ -281,6 +281,34 @@ def list_eligible_declined_cases(settings: Mapping[str, Any], limit: int = 100) 
     return eligible
 
 
+def get_campaign_by_source_case(
+    settings: Mapping[str, Any], followup_id: int
+) -> dict[str, Any] | None:
+    """Return the authoritative persisted campaign for an idempotency key."""
+    db_path = _db_path(settings)
+    init_db(db_path)
+    conn = get_conn(db_path)
+    row = conn.execute(
+        """SELECT * FROM reapplication_campaigns
+           WHERE source_case_followup_id=? ORDER BY id DESC LIMIT 1""",
+        (int(followup_id),),
+    ).fetchone()
+    if row is None:
+        conn.close()
+        return None
+    payload = dict(row)
+    attempts = conn.execute(
+        """SELECT * FROM reapplication_attempts
+           WHERE campaign_id=? ORDER BY route_index""",
+        (int(row["id"]),),
+    ).fetchall()
+    conn.close()
+    payload["created"] = False
+    payload["route"] = json.loads(payload.pop("route_json"))
+    payload["attempts"] = [dict(attempt) for attempt in attempts]
+    return payload
+
+
 def create_campaign_from_declined_case(
     settings: Mapping[str, Any],
     followup_id: int,

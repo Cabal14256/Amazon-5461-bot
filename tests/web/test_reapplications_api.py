@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from src.db import enqueue_case_followup, finish_case_followup
+from src.reapplication import get_campaign_by_source_case
 from src.web.api import reapplications as api
 from tests.web.conftest import TEST_PASSWORD, create_user, login
 
@@ -36,12 +37,19 @@ def test_reapplication_requires_reviewer_and_is_idempotent(client, web_settings,
     monkeypatch.setattr(api, "_validate_job_request", lambda settings, request: (
         {"account_id": request.account}, request.brands, request.site,
     ))
-    monkeypatch.setattr(api, "run_submit_preflight", lambda *_args: [
-        {"code": "fixture", "ok": True, "level": "info", "message": "ok"}
-    ])
-    monkeypatch.setattr(api, "launch_reapplication_worker", lambda _settings: {
-        "started": False, "reason": "test",
-    })
+    preflight_calls = []
+    worker_calls = []
+
+    def preflight(*args):
+        preflight_calls.append(args)
+        return [{"code": "fixture", "ok": True, "level": "info", "message": "ok"}]
+
+    def launch_worker(settings):
+        worker_calls.append(settings)
+        return {"started": False, "reason": "test"}
+
+    monkeypatch.setattr(api, "run_submit_preflight", preflight)
+    monkeypatch.setattr(api, "launch_reapplication_worker", launch_worker)
 
     first = client.post("/api/reapplications", json=body)
     assert first.status_code == 200, first.text
@@ -50,10 +58,16 @@ def test_reapplication_requires_reviewer_and_is_idempotent(client, web_settings,
     assert payload["reapplication"]["source_case_followup_id"] == followup_id
     assert [attempt["site"] for attempt in payload["reapplication"]["attempts"]] == ["UK", "BE"]
 
-    second = client.post("/api/reapplications", json=body)
+    second_body = dict(body, confirmed_remaining_route=["XX"])
+    second = client.post("/api/reapplications", json=second_body)
     assert second.status_code == 200
     assert second.json()["created"] is False
     assert second.json()["reapplication"]["id"] == payload["reapplication"]["id"]
+    assert second.json()["reapplication"]["route"] == ["UK", "BE", "DE", "SE", "NL", "FR"]
+    assert second.json()["preflight"] == []
+    assert second.json()["worker"] == {"started": False, "reason": "existing_campaign"}
+    assert len(preflight_calls) == 1
+    assert len(worker_calls) == 1
 
 
 def test_eligible_declines_excludes_last_route(client, web_settings):
@@ -72,3 +86,39 @@ def test_eligible_declines_excludes_last_route(client, web_settings):
     response = client.get("/api/reapplications/eligible-declines")
     assert response.status_code == 200
     assert [item["id"] for item in response.json()["eligible_declines"]] == [eligible_id]
+
+
+def test_first_reapplication_preflight_blocker_creates_nothing(
+    client, web_settings, monkeypatch
+):
+    followup_id = _declined(web_settings)
+    create_user(web_settings, "reviewer-blocked", TEST_PASSWORD, "reviewer")
+    login(client, "reviewer-blocked", TEST_PASSWORD)
+    monkeypatch.setattr(
+        api,
+        "_validate_job_request",
+        lambda settings, request: (
+            {"account_id": request.account},
+            request.brands,
+            request.site,
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "run_submit_preflight",
+        lambda *_args: [
+            {"code": "fixture", "ok": False, "level": "blocker", "message": "blocked"}
+        ],
+    )
+
+    response = client.post(
+        "/api/reapplications",
+        json={
+            "source_case_followup_id": followup_id,
+            "confirmed_remaining_route": ["BE", "DE", "SE", "NL", "FR"],
+            "authorize_submit": True,
+        },
+    )
+
+    assert response.status_code == 422
+    assert get_campaign_by_source_case(api._runtime_settings(web_settings), followup_id) is None
