@@ -20,13 +20,13 @@ Red lines enforced here:
 from __future__ import annotations
 
 import logging
-import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from src.db import list_patch_jobs_past_retention
+from src.incidents.evidence_bundle import copy_sanitized_evidence_bundle
 from src.windows_subprocess import no_window_kwargs
 
 logger = logging.getLogger(__name__)
@@ -36,8 +36,6 @@ WORKTREE_PREFIX = "repair-"
 EVIDENCE_DIRNAME = ".repair-evidence"
 _GIT_TIMEOUT_SEC = 120
 _GIT_AUTHOR = ("Amazon5461 Repair Bot", "codex-repair@localhost")
-# Screenshots stay withheld by policy; only textual evidence is copied.
-_EVIDENCE_SKIP_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
 class WorktreeError(RuntimeError):
@@ -171,14 +169,12 @@ def copy_evidence_into_worktree(incident: dict, wt_path: Path) -> list[str]:
     if not bundle_dir.is_dir():
         return []
     dest_dir = Path(wt_path) / EVIDENCE_DIRNAME
-    copied: list[str] = []
-    for child in sorted(bundle_dir.iterdir()):
-        if not child.is_file() or child.suffix.lower() in _EVIDENCE_SKIP_SUFFIXES:
-            continue
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(child, dest_dir / child.name)
-        copied.append(f"{EVIDENCE_DIRNAME}/{child.name}")
-    return copied
+    copied = copy_sanitized_evidence_bundle(
+        bundle_dir,
+        dest_dir,
+        incident=incident,
+    )
+    return [f"{EVIDENCE_DIRNAME}/{name}" for name in copied]
 
 
 def stage_patch_changes(wt_path: Path, baseline_sha: str) -> list[str]:

@@ -30,6 +30,7 @@ import logging
 import os
 import signal
 import subprocess
+import zipfile
 from pathlib import Path
 
 from src.codex_client.availability import check_availability, resolve_command_argv
@@ -41,6 +42,7 @@ from src.db import (
     mark_incident_triaged,
     record_web_audit,
 )
+from src.incidents.evidence_bundle import copy_sanitized_evidence_bundle
 from src.windows_subprocess import no_window_kwargs
 
 logger = logging.getLogger(__name__)
@@ -63,15 +65,14 @@ _AUDIT_RESULT_BY_STATUS = {
 # Prompt construction
 # ---------------------------------------------------------------------------
 
-def _evidence_file_listing(settings, incident: dict) -> str:
+def _evidence_file_listing(sandbox_root: Path, evidence_dir: Path | None) -> str:
     """Relative (repo-root) path list of present evidence-bundle files.
 
     Paths outside the repository root are never handed to the sandbox.
     """
-    raw = str(incident.get("evidence_bundle_path") or "").strip()
-    if not raw:
+    if evidence_dir is None or not Path(evidence_dir).is_dir():
         return "- (no evidence bundle recorded)"
-    bundle_dir = Path(raw)
+    bundle_dir = Path(evidence_dir)
     manifest_path = bundle_dir / "manifest.json"
     names: list[str] = []
     try:
@@ -87,7 +88,7 @@ def _evidence_file_listing(settings, incident: dict) -> str:
     if not names and bundle_dir.is_dir():
         names = sorted(child.name for child in bundle_dir.iterdir() if child.is_file())
 
-    repo_root = Path(settings.repo_root).resolve()
+    repo_root = Path(sandbox_root).resolve()
     lines: list[str] = []
     for name in names:
         try:
@@ -98,7 +99,13 @@ def _evidence_file_listing(settings, incident: dict) -> str:
     return "\n".join(lines) if lines else "- (no evidence files recorded)"
 
 
-def build_prompt(settings, incident: dict) -> str:
+def build_prompt(
+    settings,
+    incident: dict,
+    *,
+    evidence_dir: Path | None = None,
+    sandbox_root: Path | None = None,
+) -> str:
     """Fill the reviewable prompt template with the incident summary."""
     template_path = (
         Path(settings.repo_root) / "knowledge" / "prompts" / "codex_triage_prompt.md"
@@ -110,7 +117,12 @@ def build_prompt(settings, incident: dict) -> str:
         .replace("{{CLASSIFICATION}}", str(incident.get("classification") or ""))
         .replace("{{CONFIDENCE}}", f"{float(incident.get('confidence') or 0.0):.2f}")
         .replace("{{OCCURRENCE_COUNT}}", str(int(incident.get("occurrence_count") or 0)))
-        .replace("{{EVIDENCE_FILES}}", _evidence_file_listing(settings, incident))
+        .replace(
+            "{{EVIDENCE_FILES}}",
+            _evidence_file_listing(
+                Path(sandbox_root or settings.repo_root), evidence_dir
+            ),
+        )
     )
 
 
@@ -287,7 +299,13 @@ def _kill_process_tree(proc) -> None:
                 pass
 
 
-def build_argv(settings, schema_path: Path, out_path: Path) -> list[str]:
+def build_argv(
+    settings,
+    schema_path: Path,
+    out_path: Path,
+    *,
+    sandbox_root: Path | None = None,
+) -> list[str]:
     argv = [
         *resolve_command_argv(settings.codex_command),
         "exec",
@@ -299,12 +317,43 @@ def build_argv(settings, schema_path: Path, out_path: Path) -> list[str]:
         "-s",
         "read-only",
         "-C",
-        str(Path(settings.repo_root).resolve()),
+        str(Path(sandbox_root or settings.repo_root).resolve()),
     ]
     if str(settings.codex_model or "").strip():
         argv += ["-m", str(settings.codex_model).strip()]
     argv.append("-")
     return argv
+
+
+def _prepare_read_only_repo_snapshot(settings, destination: Path) -> Path:
+    """Extract tracked HEAD only; ignored/private working-tree data is absent."""
+    repo_root = Path(settings.repo_root).resolve()
+    destination = Path(destination).resolve()
+    destination.mkdir(parents=True, exist_ok=False)
+    archive_path = destination.parent / "tracked-head.zip"
+    try:
+        proc = subprocess.run(
+            ["git", "archive", "--format=zip", "-o", str(archive_path), "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            **no_window_kwargs(),
+        )
+        if proc.returncode != 0 or not archive_path.is_file():
+            raise RuntimeError("git_archive_failed")
+        with zipfile.ZipFile(archive_path) as archive:
+            for member in archive.infolist():
+                path = Path(member.filename)
+                if path.is_absolute() or ".." in path.parts:
+                    raise RuntimeError("unsafe_archive_path")
+            archive.extractall(destination)
+    finally:
+        try:
+            archive_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return destination
 
 
 # ---------------------------------------------------------------------------
@@ -328,12 +377,35 @@ def _run_single_attempt(settings, incident: dict, *, spawn=None) -> dict:
     def _finish(status: str, **fields) -> dict:
         return finish_repair_job(db_path, job_id, status, **fields) or job
 
-    prompt = build_prompt(settings, incident)
-    argv = build_argv(settings, TRIAGE_SCHEMA_PATH, out_path)
+    try:
+        safe_repo_dir = _prepare_read_only_repo_snapshot(settings, state_dir / "repo")
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        logger.warning("[codex] 创建只读 tracked 快照失败 job=%s: %s", job_id, type(exc).__name__)
+        return _finish("failed")
+    raw_bundle = str(incident.get("evidence_bundle_path") or "").strip()
+    safe_evidence_dir = safe_repo_dir / ".repair-evidence"
+    if raw_bundle:
+        copy_sanitized_evidence_bundle(
+            Path(raw_bundle),
+            safe_evidence_dir,
+            incident=incident,
+        )
+    prompt = build_prompt(
+        settings,
+        incident,
+        evidence_dir=safe_evidence_dir,
+        sandbox_root=safe_repo_dir,
+    )
+    argv = build_argv(
+        settings,
+        TRIAGE_SCHEMA_PATH,
+        out_path,
+        sandbox_root=safe_repo_dir,
+    )
 
     spawn_fn = spawn or _spawn
     try:
-        proc = spawn_fn(argv, Path(settings.repo_root))
+        proc = spawn_fn(argv, safe_repo_dir)
     except FileNotFoundError:
         return _finish("unavailable")
     except OSError as exc:

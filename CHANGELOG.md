@@ -12,6 +12,11 @@
 - Release only through a local clean-tree `git merge --no-ff`; keep the master
   switch off by default and roll back exclusively with an auditable `git
   revert` commit. No push or PR is performed.
+- Remove account/brand/profile/Case/SKU identity and raw screenshot paths from
+  future incident bundles. Stage-6 triage and Stage-7 patch generation now read
+  only per-job, text-only sanitized evidence snapshots, including for legacy
+  bundles. Stage-6 runs against a tracked-HEAD archive, so ignored private
+  working-tree files are outside its sandbox.
 - Keep `false_approved`, `pending`, and `verification_pending` Case tasks in
   scheduled follow-up until effective approval, explicit rejection, or the
   global six-check limit; unresolved sixth checks move to manual review and do

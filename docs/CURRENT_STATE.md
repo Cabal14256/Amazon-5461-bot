@@ -425,6 +425,13 @@ Stage 7 (isolated patch generation) is implemented
   (state trace + run context; DOM/screenshot artifacts honestly marked
   absent). Known limitation: redaction over-mangles timestamps inside the
   trace (digit runs match the phone pattern) — safe but noisy.
+- Codex never reads the original evidence directory directly. Each Stage-6
+  triage job and Stage-7 repair worktree receives a text-only sanitized copy;
+  account, brand, profile, Case/SKU fields and raw screenshot paths are removed.
+  This also protects historical bundles created before the stricter policy.
+  Stage-6's sandbox root is a per-job archive of tracked `HEAD`, not the live
+  repository, so ignored `.env`, `runtime/private/`, `data/` and brand packs
+  cannot be read even if a prompt instruction were ignored.
 - Stage-7 tests added worktree lifecycle/dedup/cleanup/private-file exclusion,
   §18.1 rule coverage + clean-diff no-false-positive, patch precondition
   branches/timeout/schema-retry/risk strictness, and an end-to-end API

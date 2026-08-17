@@ -3,7 +3,11 @@
 import json
 
 from src.incidents import build_evidence_bundle
-from src.incidents.evidence_bundle import UNTRUSTED_BEGIN, UNTRUSTED_END
+from src.incidents.evidence_bundle import (
+    UNTRUSTED_BEGIN,
+    UNTRUSTED_END,
+    copy_sanitized_evidence_bundle,
+)
 
 FAKE_EMAIL = "fake-seller@example.com"
 FAKE_AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
@@ -91,8 +95,8 @@ def test_screenshot_withheld_marker(tmp_path):
     withheld = json.loads((bundle / "screenshot-withheld.json").read_text(encoding="utf-8"))
     assert withheld == {
         "withheld": True,
-        "reason": "stage-5 default",
-        "original_private_path": "runtime/evidence/private/shot-9.png",
+        "reason": "privacy_policy",
+        "original_private_path_recorded": True,
     }
     # The raw screenshot is never copied into the bundle.
     assert not any(p.suffix.lower() == ".png" for p in bundle.iterdir())
@@ -117,7 +121,9 @@ def test_run_context_drops_credential_keys(tmp_path):
     assert "email" not in context
     assert "username" not in context
     assert "password" not in context
-    assert context["account_id"] == "us_store_999"
+    assert "account_id" not in context
+    assert "brand_name" not in context
+    assert context["site"] == "US"
 
 
 def test_no_secret_leaks_anywhere_in_bundle(tmp_path):
@@ -145,3 +151,40 @@ def test_minimal_bundle_without_page_evidence(tmp_path):
     assert manifest["files"]["page-summary.redacted.json"]["absent"] is True
     assert manifest["files"]["visible-text.redacted.txt"]["absent"] is True
     assert (bundle / "manifest.json").exists()
+
+
+def test_legacy_bundle_is_deidentified_when_staged_for_codex(tmp_path):
+    source = tmp_path / "legacy"
+    destination = tmp_path / "safe"
+    source.mkdir()
+    (source / "page-summary.redacted.json").write_text(
+        json.dumps({
+            "account_id": "us_store_999",
+            "brand_name": "TESTBRAND",
+            "message": "Failure for TESTBRAND on us_store_999",
+        }),
+        encoding="utf-8",
+    )
+    (source / "screenshot-withheld.json").write_text(
+        json.dumps({
+            "withheld": True,
+            "original_private_path": "runtime/evidence/us_store_999/TESTBRAND/shot.png",
+        }),
+        encoding="utf-8",
+    )
+
+    copied = copy_sanitized_evidence_bundle(
+        source,
+        destination,
+        incident={"account_id": "us_store_999", "brand_name": "TESTBRAND"},
+    )
+
+    assert copied == ["page-summary.redacted.json", "screenshot-withheld.json"]
+    combined = "\n".join(
+        path.read_text(encoding="utf-8") for path in destination.iterdir()
+    )
+    assert "us_store_999" not in combined
+    assert "TESTBRAND" not in combined
+    assert "original_private_path\"" not in combined
+    assert "[REDACTED_ACCOUNT]" in combined
+    assert "[REDACTED_BRAND]" in combined

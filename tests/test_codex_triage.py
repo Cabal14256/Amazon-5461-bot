@@ -131,13 +131,16 @@ class FakeProc:
 
 def _spawn_factory(**kwargs):
     procs = []
+    cwds = []
 
     def factory(argv, cwd=None):
         proc = FakeProc(argv, **kwargs)
         procs.append(proc)
+        cwds.append(Path(cwd) if cwd else None)
         return proc
 
     factory.procs = procs
+    factory.cwds = cwds
     return factory
 
 
@@ -264,6 +267,18 @@ def test_triage_success_marks_incident_triaged(env):
     prompt = spawn.procs[0].stdin_data.decode("utf-8")
     assert incident["signature"] in prompt
     assert "UNTRUSTED" in prompt
+    assert incident["evidence_bundle_path"] not in prompt
+    safe_repo = Path(job["result_json_path"]).parent / "repo"
+    safe_dir = safe_repo / ".repair-evidence"
+    combined = "\n".join(
+        path.read_text(encoding="utf-8") for path in safe_dir.iterdir()
+    )
+    assert incident["account_id"] not in combined
+    assert incident["brand_name"] not in combined
+    assert spawn.cwds == [safe_repo]
+    assert spawn.procs[0].argv[spawn.procs[0].argv.index("-C") + 1] == str(safe_repo)
+    assert not (safe_repo / "runtime" / "private").exists()
+    assert not (safe_repo / ".env").exists()
 
 
 def test_triage_falls_back_to_last_agent_message(env):
