@@ -145,6 +145,25 @@ def test_no_secret_leaks_anywhere_in_bundle(tmp_path):
         assert "fake-password-123" not in content
 
 
+def test_url_query_asin_and_known_sku_are_redacted(tmp_path):
+    sku = "PRIVATE-SKU-123"
+    asin = "B012345678"
+    bundle = build_evidence_bundle(
+        19,
+        tmp_path,
+        page_evidence={
+            "url": f"https://sellercentral.amazon.com/add-product?token=secret&asin={asin}#panel",
+            "visible_text": f"Item {asin} uses {sku}",
+        },
+        run_context={"site": "US", "sku": sku, "asin": asin},
+    )
+    serialized = "\n".join(path.read_text(encoding="utf-8") for path in bundle.iterdir())
+    assert "token=secret" not in serialized
+    assert "#panel" not in serialized
+    assert asin not in serialized
+    assert sku not in serialized
+
+
 def test_minimal_bundle_without_page_evidence(tmp_path):
     bundle = build_evidence_bundle(23, tmp_path)
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))

@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from playwright.sync_api import Page, sync_playwright
 
@@ -1040,8 +1041,14 @@ def capture_failure_page_evidence(page) -> dict:
     state, visible text, and selector-probe context to distinguish a state
     recognizer defect from a changed workflow or a genuinely missing control.
     """
+    raw_url = str(getattr(page, "url", "") or "")
+    try:
+        parsed_url = urlsplit(raw_url)
+        safe_url = urlunsplit((parsed_url.scheme, parsed_url.netloc, parsed_url.path, "", ""))
+    except ValueError:
+        safe_url = ""
     evidence = {
-        "url": str(getattr(page, "url", "") or ""),
+        "url": safe_url,
         "visible_text": "",
         "recognized_state": {},
         "selector_probes": {},

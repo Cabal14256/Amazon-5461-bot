@@ -43,7 +43,10 @@ from src.db import (
     mark_incident_triaged,
     record_web_audit,
 )
-from src.incidents.evidence_bundle import copy_sanitized_evidence_bundle
+from src.incidents.evidence_bundle import (
+    copy_sanitized_evidence_bundle,
+    refresh_incident_evidence_gate,
+)
 from src.windows_subprocess import no_window_kwargs
 
 logger = logging.getLogger(__name__)
@@ -499,6 +502,7 @@ def run_triage(
     if incident is None:
         _audit("unknown_incident")
         return {"outcome": "unknown_incident", "job": None, "triage": None, "incident": None}
+    incident = refresh_incident_evidence_gate(db_path, incident_id) or incident
 
     def _done(outcome: str, job: dict | None, triage) -> dict:
         return {

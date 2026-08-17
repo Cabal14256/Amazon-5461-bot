@@ -30,7 +30,12 @@ from src.db import (  # noqa: E402
     record_incident,
     set_incident_evidence_bundle,
 )
+from src.incidents.evidence_bundle import (  # noqa: E402
+    assess_evidence_bundle,
+    build_evidence_bundle,
+)
 from src.web.config import WebSettings  # noqa: E402
+from tests.evidence_fixtures import dom_contract, previous_success  # noqa: E402
 from tests.test_repair_worktree import INCIDENT, git, make_git_repo  # noqa: E402
 
 AVAILABLE = CodexAvailability(True, version="codex-cli 0.147.0-test")
@@ -63,6 +68,7 @@ def env(tmp_path):
     repo = make_git_repo(tmp_path / "repo")
     return WebSettings(
         db_path=db_path,
+        evidence_root=runtime / "evidence",
         repo_root=repo,
         codex_worktree_root=tmp_path / "worktrees",
         codex_logs_root=runtime / "logs" / "repair",
@@ -89,8 +95,29 @@ def _seed_incident(env, triage_payload=None, **overrides):
     }
     kwargs.update(overrides)
     incident, _ = record_incident(str(env.db_path), **kwargs)
+    bundle = build_evidence_bundle(
+        incident["id"],
+        env.evidence_root,
+        page_evidence={
+            "recognized_state": {"page_type": "product_identity"},
+            "evidence_node": "product_identity",
+            "visible_text": "Apply to sell",
+        },
+        run_context={"flow_type": "5461", "marketplace": "US"},
+        selectors={
+            "declared_candidates": ["button[data-testid='apply-to-sell']"],
+            "probes": {"button[data-testid='apply-to-sell']": {"match_count": 1}},
+        },
+        dom_contract=dom_contract(),
+        previous_success=previous_success(),
+    )
+    gate = assess_evidence_bundle(bundle)
     set_incident_evidence_bundle(
-        str(env.db_path), incident["id"], "", evidence_status="ready", missing_evidence=[],
+        str(env.db_path),
+        incident["id"],
+        str(bundle),
+        evidence_status=gate["status"],
+        missing_evidence=gate["missing"],
     )
     if triage_payload is not None:
         mark_incident_triaged(str(env.db_path), incident["id"])

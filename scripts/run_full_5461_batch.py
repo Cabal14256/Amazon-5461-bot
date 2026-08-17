@@ -125,6 +125,8 @@ def _register_batch_success_contract(item: dict, result: dict, config: dict) -> 
         run_context={
             "account_id": item.get("account_id") or config.get("account_id"),
             "brand_name": item.get("brand_name"),
+            "case_id": result.get("case_id"),
+            "sku": result.get("synced_sku"),
         },
     )
 
@@ -238,7 +240,11 @@ def _record_batch_failure_incident(item: dict, result: dict, config: dict, *, dr
         run_context={
             "account_id": account_id,
             "site": site,
+            "marketplace": site,
+            "flow_type": "5461",
             "brand_name": brand_name,
+            "case_id": result.get("case_id"),
+            "sku": result.get("synced_sku"),
             "detector_type": "batch",
             "dry_run": bool(dry_run),
         },

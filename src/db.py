@@ -560,6 +560,20 @@ def _run_migrations(conn):
     _ensure_column(conn, 'repair_incidents', 'evidence_status', "TEXT NOT NULL DEFAULT 'incomplete'")
     _ensure_column(conn, 'repair_incidents', 'missing_evidence_json', "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, 'repair_incidents', 'evidence_checked_at', 'TEXT')
+    required_evidence_json = json.dumps(
+        [
+            "page_summary",
+            "selectors_and_probes",
+            "dom_shadow_contract",
+            "previous_success",
+        ]
+    )
+    conn.execute(
+        """UPDATE repair_incidents SET missing_evidence_json=?
+           WHERE evidence_status<>'ready'
+             AND (missing_evidence_json IS NULL OR TRIM(missing_evidence_json) IN ('', '[]'))""",
+        (required_evidence_json,),
+    )
     conn.execute(
         """UPDATE repair_incidents SET status='waiting_evidence'
            WHERE status='open' AND evidence_status<>'ready'"""
@@ -2545,6 +2559,25 @@ def find_success_contract(
     return dict(row) if row else None
 
 
+def list_waiting_incidents_for_success_contract(
+    db_path: str,
+    *,
+    flow_type: str,
+    marketplace: str,
+) -> list[dict]:
+    """Waiting incidents that may match a newly registered page contract."""
+    conn = get_conn(db_path)
+    rows = conn.execute(
+        """SELECT * FROM repair_incidents
+           WHERE status='waiting_evidence' AND evidence_status<>'ready'
+             AND flow_type=? AND marketplace=?
+           ORDER BY id""",
+        (str(flow_type), str(marketplace).upper()),
+    ).fetchall()
+    conn.close()
+    return [_incident_row_to_dict(row) for row in rows]
+
+
 # ---------------------------------------------------------------------------
 # Stage-6 Codex read-only triage (codex_repair_jobs)
 # ---------------------------------------------------------------------------
@@ -3156,6 +3189,23 @@ def list_pending_git_operations(db_path: str) -> list[dict]:
     return [_git_operation_row_to_dict(row) for row in rows]
 
 
+def count_unresolved_git_reconciliation(db_path: str) -> int:
+    """Count pending journals and fail-closed repair-job reconciliation states."""
+    conn = get_conn(db_path)
+    row = conn.execute(
+        """SELECT
+               (SELECT COUNT(*) FROM repair_git_operations
+                WHERE state IN ('prepared','git_applied'))
+             + (SELECT COUNT(*) FROM codex_repair_jobs
+                WHERE status IN (
+                    'release_reconciliation_required',
+                    'rollback_reconciliation_required'
+                )) AS unresolved"""
+    ).fetchone()
+    conn.close()
+    return int(row["unresolved"] or 0)
+
+
 def begin_git_operation(
     db_path: str,
     *,
@@ -3330,10 +3380,15 @@ def require_git_operation_reconciliation(
         if operation is None:
             conn.rollback()
             return None
-        conn.execute(
-            "UPDATE codex_repair_jobs SET status=? WHERE id=? AND status=?",
-            (str(reconciliation_status), int(operation["repair_job_id"]), str(intent_status)),
+        changed = conn.execute(
+            """UPDATE codex_repair_jobs
+               SET status=?, release_process_pid=NULL
+               WHERE id=?""",
+            (str(reconciliation_status), int(operation["repair_job_id"])),
         )
+        if changed.rowcount != 1:
+            conn.rollback()
+            return None
         timestamp = now_str()
         conn.execute(
             """UPDATE repair_git_operations

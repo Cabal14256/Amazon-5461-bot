@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.db import (  # noqa: E402
     create_patch_job,
+    get_incident,
     get_repair_job,
     init_db,
     list_approvals,
@@ -119,6 +120,36 @@ def test_migration_idempotent(tmp_path):
         "id", "repair_job_id", "decision", "actor_id", "note", "created_at"
     }
     assert _index_sql(path, "idx_repair_approvals_job") is not None
+
+
+def test_migration_populates_legacy_evidence_missing_items_without_regression(db_path):
+    open_id = _seed_incident(db_path, "legacy-evidence-open")
+    triaged_id = _seed_incident(db_path, "legacy-evidence-triaged")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE repair_incidents SET status='triaged', missing_evidence_json='[]' WHERE id=?",
+        (triaged_id,),
+    )
+    conn.execute(
+        "UPDATE repair_incidents SET status='open', missing_evidence_json='[]' WHERE id=?",
+        (open_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    init_db(db_path)
+    init_db(db_path)
+
+    expected = [
+        "page_summary",
+        "selectors_and_probes",
+        "dom_shadow_contract",
+        "previous_success",
+    ]
+    assert get_incident(db_path, open_id)["status"] == "waiting_evidence"
+    assert get_incident(db_path, open_id)["missing_evidence"] == expected
+    assert get_incident(db_path, triaged_id)["status"] == "triaged"
+    assert get_incident(db_path, triaged_id)["missing_evidence"] == expected
 
 
 def test_active_patch_index_rebuilt_from_old_db(db_path):

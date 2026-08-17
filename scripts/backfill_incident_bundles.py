@@ -65,8 +65,17 @@ def _iter_success_items(payload: dict):
 
 
 def _scan_files(root: Path):
-    for pattern in ("data/batch_*.json", "runtime/state/*.json"):
-        yield from sorted(root.glob(pattern))
+    seen: set[Path] = set()
+    for pattern in (
+        "data/batch_*.json",
+        "runtime/state/*.json",
+        "runtime/state/reapplications/**/*.json",
+    ):
+        for path in sorted(root.glob(pattern)):
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                yield path
 
 
 def _collect_failures(root: Path) -> dict:
@@ -115,6 +124,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true", help="build bundles and update the DB")
     parser.add_argument("--incident-id", type=int, default=None, help="only this incident")
+    parser.add_argument("--root", type=Path, default=project_root, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     settings = load_settings()
@@ -123,33 +133,33 @@ def main() -> int:
 
     conn = get_conn(db_path)
     conn.row_factory = conn.row_factory  # keep default tuples via raw SQL below
-    rows = conn.execute(
-        """SELECT id, account_id, marketplace, brand_name, classification, occurrence_count
-           FROM repair_incidents
-           WHERE COALESCE(evidence_bundle_path, '') = '' OR status='waiting_evidence'"""
-    ).fetchall()
-    conn.close()
+    sql = """SELECT id, account_id, marketplace, brand_name, classification,
+                    occurrence_count, evidence_bundle_path
+             FROM repair_incidents WHERE evidence_status<>'ready'"""
+    params: tuple = ()
     if args.incident_id is not None:
-        rows = [r for r in rows if int(r[0]) == int(args.incident_id)]
+        sql += " AND id=?"
+        params = (int(args.incident_id),)
+    rows = conn.execute(sql + " ORDER BY id", params).fetchall()
+    conn.close()
 
-    failures = _collect_failures(project_root)
-    success_contracts = _collect_success_contracts(project_root)
+    scan_root = args.root.resolve()
+    failures = _collect_failures(scan_root)
+    success_contracts = _collect_success_contracts(scan_root)
     matched, skipped = [], []
-    for inc_id, account_id, marketplace, brand_name, classification, occ in rows:
+    for inc_id, account_id, marketplace, brand_name, classification, occ, bundle_path in rows:
         entries = failures.get((str(account_id), str(marketplace), str(brand_name))) or []
         if not entries:
-            skipped.append((inc_id, account_id, marketplace, brand_name, classification))
+            skipped.append((inc_id, bundle_path))
             continue
-        matched.append((inc_id, account_id, marketplace, brand_name, classification, occ, entries))
+        matched.append(
+            (inc_id, account_id, marketplace, brand_name, classification, occ, entries)
+        )
 
     print(
         f"incidents needing bundle evaluation: {len(rows)}; matched: {len(matched)}; "
         f"no history: {len(skipped)}; exact success contracts: {len(success_contracts)}"
     )
-    for inc_id, account_id, marketplace, brand_name, classification, _occ, entries in matched:
-        print(f"  #{inc_id} {account_id}/{marketplace}/{brand_name} [{classification}] "
-              f"<- {len(entries)} historical failure(s), e.g. {entries[-1]['source']}")
-
     if not args.write:
         print("dry-run; pass --write to register fixtures, build bundles and re-evaluate gates")
         return 0
@@ -184,6 +194,21 @@ def main() -> int:
         )
         registered += int(row is not None)
 
+    reevaluated = 0
+    for inc_id, bundle_path in skipped:
+        path = Path(str(bundle_path or ""))
+        if not path.is_dir():
+            continue
+        gate = assess_evidence_bundle(path)
+        set_incident_evidence_bundle(
+            db_path,
+            int(inc_id),
+            str(path),
+            evidence_status=gate["status"],
+            missing_evidence=gate["missing"],
+        )
+        reevaluated += 1
+
     built = 0
     for inc_id, account_id, marketplace, brand_name, _classification, occ, entries in matched:
         latest = entries[-1]
@@ -205,8 +230,11 @@ def main() -> int:
         run_context = {
             "account_id": account_id,
             "marketplace": marketplace,
+            "site": marketplace,
             "brand_name": brand_name,
             "flow_type": "5461",
+            "case_id": result.get("case_id"),
+            "sku": result.get("synced_sku"),
             "detector_type": "replay_backfill",
             "occurrence_count": occ,
             "source_file": latest["source"],
@@ -244,7 +272,8 @@ def main() -> int:
         )
         built += 1
     print(
-        f"registered {registered} success contract(s); built/re-evaluated {built} bundle(s) "
+        f"registered {registered} success contract(s); built {built} and re-evaluated "
+        f"{reevaluated} existing bundle(s) "
         f"under {evidence_root / 'incidents'}"
     )
     return 0

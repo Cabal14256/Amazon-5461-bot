@@ -26,6 +26,11 @@ from src.db import (  # noqa: E402
     record_incident,
     set_incident_evidence_bundle,
 )
+from src.incidents.evidence_bundle import (  # noqa: E402
+    assess_evidence_bundle,
+    build_evidence_bundle,
+)
+from tests.evidence_fixtures import dom_contract, previous_success  # noqa: E402
 from tests.test_repair_worktree import git, make_git_repo  # noqa: E402
 from tests.web.conftest import TEST_PASSWORD, create_user, login  # noqa: E402
 
@@ -105,7 +110,7 @@ def patch_env(web_settings, tmp_path):
     return web_settings
 
 
-def _seed_triaged(settings, **overrides):
+def _seed_incident_with_evidence(settings, *, triaged=True, **overrides):
     kwargs = {
         "signature": "abc123def4567890",
         "scope_type": "account",
@@ -119,9 +124,32 @@ def _seed_triaged(settings, **overrides):
     }
     kwargs.update(overrides)
     incident, _ = record_incident(str(settings.db_path), **kwargs)
-    set_incident_evidence_bundle(
-        str(settings.db_path), incident["id"], "", evidence_status="ready", missing_evidence=[],
+    bundle = build_evidence_bundle(
+        incident["id"],
+        settings.evidence_root,
+        page_evidence={
+            "recognized_state": {"page_type": "product_identity"},
+            "evidence_node": "product_identity",
+            "visible_text": "Apply to sell",
+        },
+        run_context={"flow_type": "5461", "marketplace": "US"},
+        selectors={
+            "declared_candidates": ["button[data-testid='apply-to-sell']"],
+            "probes": {"button[data-testid='apply-to-sell']": {"match_count": 1}},
+        },
+        dom_contract=dom_contract(),
+        previous_success=previous_success(),
     )
+    gate = assess_evidence_bundle(bundle)
+    set_incident_evidence_bundle(
+        str(settings.db_path),
+        incident["id"],
+        str(bundle),
+        evidence_status=gate["status"],
+        missing_evidence=gate["missing"],
+    )
+    if not triaged:
+        return get_incident(str(settings.db_path), incident["id"])
     mark_incident_triaged(str(settings.db_path), incident["id"])
     triage_job = create_repair_job(
         str(settings.db_path), incident["id"], stage="triage", status="succeeded"
@@ -135,6 +163,10 @@ def _seed_triaged(settings, **overrides):
         result_json_path=str(result_path),
     )
     return get_incident(str(settings.db_path), incident["id"])
+
+
+def _seed_triaged(settings, **overrides):
+    return _seed_incident_with_evidence(settings, triaged=True, **overrides)
 
 
 def _operator_client(client, settings):
@@ -228,13 +260,11 @@ def test_generate_patch_disabled_503(client, web_settings):
 
 
 def test_generate_patch_not_triaged_409(client, patch_env):
-    kwargs = {
-        "signature": "abc123def4567890",
-        "scope_type": "account",
-        "classification": "selector_missing",
-        "confidence": 0.5,
-    }
-    incident, _ = record_incident(str(patch_env.db_path), **kwargs)
+    incident = _seed_incident_with_evidence(
+        patch_env,
+        triaged=False,
+        confidence=0.5,
+    )
     operator = _operator_client(client, patch_env)
     response = operator.post(f"/api/incidents/{incident['id']}/generate-patch")
     assert response.status_code == 409

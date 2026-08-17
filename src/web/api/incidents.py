@@ -23,6 +23,7 @@ from src.db import (
     list_repair_jobs,
     record_web_audit,
 )
+from src.incidents.evidence_bundle import refresh_incident_evidence_gate
 from src.web.deps import get_settings, require_role
 from src.web.schemas import IncidentCloseRequest, IncidentOut, RepairJobOut
 from src.web.services.evidence_index import classify_file
@@ -114,6 +115,9 @@ def get_incident_detail(incident_id: int, request: Request):
     incident = get_incident(str(settings.db_path), incident_id)
     if incident is None:
         raise HTTPException(status_code=404, detail="unknown_incident")
+    incident = (
+        refresh_incident_evidence_gate(str(settings.db_path), incident_id) or incident
+    )
     return {
         "incident": IncidentOut(**incident),
         "bundle_files": _bundle_files(settings, incident),

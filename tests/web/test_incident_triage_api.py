@@ -16,6 +16,7 @@ import pytest
 from src.codex_client.auto_triage import run_auto_triage_scan
 from src.db import get_incident, record_incident, set_incident_evidence_bundle
 from src.incidents import assess_evidence_bundle, build_evidence_bundle
+from tests.evidence_fixtures import dom_contract, previous_success
 from tests.web.conftest import TEST_PASSWORD, create_user, login
 
 MOCK_CODEX = r'''
@@ -86,10 +87,10 @@ def _seed(db_path, evidence_root=None, **overrides):
         incident["id"],
         evidence_root,
         page_evidence={"visible_text": "Apply to sell"},
-        run_context={"account_id": "us_store_999"},
+        run_context={"account_id": "us_store_999", "marketplace": "US", "flow_type": "5461"},
         selectors={"declared_candidates": ["kat-button"], "probes": {"count": 1}},
-        dom_contract={"schema_version": 1, "nodes": [{"tag": "kat-button"}]},
-        previous_success={"contract_hash": "a" * 64, "contract": {"nodes": [{"tag": "kat-button"}]}},
+        dom_contract=dom_contract(),
+        previous_success=previous_success(),
     )
     gate = assess_evidence_bundle(bundle)
     set_incident_evidence_bundle(

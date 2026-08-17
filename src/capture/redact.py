@@ -30,6 +30,8 @@ SENSITIVE_PATTERNS = [
     (r"(?i)set-cookie\s*:\s*[^\r\n]+", "Set-Cookie: [REDACTED]"),
     # Email addresses
     (r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[REDACTED_EMAIL]"),
+    # Amazon ASINs (10 uppercase alphanumeric characters, normally starting B0)
+    (r"\bB0[A-Z0-9]{8}\b", "[REDACTED_ASIN]"),
     # Password fields
     (r"(?i)(password|passwd|pwd)\s*[:=]\s*[^\s&\"\']+", "\\1: [REDACTED]"),
     # OTP / MFA codes

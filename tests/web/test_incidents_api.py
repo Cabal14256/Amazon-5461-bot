@@ -183,7 +183,14 @@ def test_incident_out_matches_contract(viewer_client, web_settings):
     assert data["flow_type"] == "5461"
     assert data["detector_type"] == "batch"
     assert data["classification"] == "selector_missing"
-    assert data["status"] == "open"
+    assert data["status"] == "waiting_evidence"
+    assert data["evidence_status"] == "incomplete"
+    assert data["missing_evidence"] == [
+        "page_summary",
+        "selectors_and_probes",
+        "dom_shadow_contract",
+        "previous_success",
+    ]
     assert data["occurrence_count"] == 1
     assert isinstance(data["confidence"], (int, float))
     # JSON round-trip sanity of the full payload.

@@ -17,7 +17,7 @@ class _MissingLocator:
 class _ProductIdentityPage:
     url = (
         "https://sellercentral.amazon.com/interactive/listing/workflow/"
-        "create/product_identity?productType=SCREEN_PROTECTOR"
+        "create/product_identity?productType=SCREEN_PROTECTOR#approval"
     )
 
     def __init__(self, text):
@@ -79,7 +79,9 @@ def test_failure_page_evidence_captures_state_text_and_control_probes():
 
     evidence = capture_failure_page_evidence(page)
 
-    assert evidence["url"] == page.url
+    assert evidence["url"] == (
+        "https://sellercentral.amazon.com/interactive/listing/workflow/create/product_identity"
+    )
     assert evidence["recognized_state"]["page_type"] == "NEEDS_APPROVAL_NEW_UI"
     assert evidence["visible_text"].startswith("Approval Required")
     assert evidence["selector_probes"]["approval_control_texts"] == ["View"]

@@ -59,6 +59,7 @@ from src.db import (
     record_web_audit,
     set_repair_job_worktree,
 )
+from src.incidents.evidence_bundle import refresh_incident_evidence_gate
 from src.repair.diff_scan import backend_risk_level, scan_diff, stricter_risk
 from src.repair.worktree import (
     WorktreeError,
@@ -282,6 +283,7 @@ def run_patch_generation(
         _audit("unknown_incident")
         return {"outcome": "unknown_incident", "job": None, "result": None,
                 "incident": None, "violations": []}
+    incident = refresh_incident_evidence_gate(db_path, incident_id) or incident
 
     def _done(outcome: str, job: dict | None, result=None, violations=None) -> dict:
         return {
