@@ -217,6 +217,15 @@ the work tab when the group ends. After Playwright detaches, the worker stops
 that AdsPower profile so the browser window does not remain open. This cleanup
 does not submit or resubmit any application.
 
+The initial marketplace selection is confirmed from an explicit
+`mons_sel_mkid`, Seller Central's active marketplace ID, or the exact country
+label in the account-switcher header. Shared hostnames such as
+`sellercentral.amazon.com` (US/MX) and `sellercentral.amazon.co.uk` (multiple EU
+countries) are not sufficient proof by themselves. If the active marketplace
+cannot be confirmed, the worker uses the existing full-page account-switcher,
+selects the requested country, and verifies the same active-market signals
+before opening a Case or running approval checks.
+
 The normal worker claims only the oldest due account/marketplace group in one
 transaction. Other groups remain `pending`/`retry` until a worker actually
 starts them. When the due backlog reaches the configured threshold, up to three

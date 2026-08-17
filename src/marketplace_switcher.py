@@ -13,9 +13,9 @@ Amazon Seller Central 市场切换模块
 
 import re
 import time
-from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
+from typing import Dict, List, Optional, Tuple
 
 from playwright.sync_api import Page
 
@@ -59,6 +59,24 @@ MARKETPLACE_CONFIG: Dict[str, MarketplaceInfo] = {
 REGION_MARKETPLACES = {
     MarketplaceRegion.EU: ["UK", "BE", "NL", "SE", "DE", "FR", "ES", "IT", "PL"],
     MarketplaceRegion.NA: ["US", "CA", "MX"],
+}
+
+# Amazon's active marketplace ID is available as ``window.ue_mid`` on normal
+# Seller Central pages.  Unlike the hostname, it distinguishes marketplaces
+# that share a portal domain (notably US/MX and the European marketplaces).
+MARKETPLACE_ID_MAP = {
+    "ATVPDKIKX0DER": "US",
+    "A2EUQ1WTGCTBG2": "CA",
+    "A1AM78C64UM0Y8": "MX",
+    "A1F83G8C2ARO7P": "UK",
+    "AMEN7PMS3EDWL": "BE",
+    "A1805IZSGTT6HS": "NL",
+    "A2NODRKZP88ZB9": "SE",
+    "A1PA6795UKMFR9": "DE",
+    "A13V1IB3VIYZZH": "FR",
+    "A1RKKUPIHCS9HS": "ES",
+    "APJ6JRA9NG5V4": "IT",
+    "A1C3SOZRARQ6R3": "PL",
 }
 
 
@@ -211,12 +229,60 @@ class MarketplaceSwitcher:
         
         return detected
     
-    # MKID 到市场代码映射（逐步收集）
     MKID_MAP = {
-        "amzn1.mp.o.A1AM78C64UM0Y8": "MX",
-        "amzn1.mp.o.AMEN7PMS3EDWL": "BE",
-        "amzn1.mp.o.A1F83G8C2ARO7P": "UK",
+        f"amzn1.mp.o.{marketplace_id}": code
+        for marketplace_id, code in MARKETPLACE_ID_MAP.items()
     }
+
+    @staticmethod
+    def _marketplace_from_id(raw_marketplace_id: object) -> Optional[str]:
+        """Resolve either a bare marketplace ID or a mons_sel_mkid value."""
+        value = str(raw_marketplace_id or "").strip()
+        if not value:
+            return None
+        marketplace_id = value.rsplit(".", 1)[-1]
+        return MARKETPLACE_ID_MAP.get(marketplace_id)
+
+    @staticmethod
+    def _marketplace_from_label(raw_label: object) -> Optional[str]:
+        """Resolve the exact marketplace label shown in Seller Central's header."""
+        label = " ".join(str(raw_label or "").split()).casefold()
+        if not label:
+            return None
+        for code, info in MARKETPLACE_CONFIG.items():
+            if label == info.name.casefold():
+                return code
+        return None
+
+    def _detect_active_marketplace_from_page(self) -> Optional[str]:
+        """Read active-market signals that are specific to the selected country."""
+        try:
+            signals = self.page.evaluate(
+                """() => {
+                    const header = document.querySelector(
+                        '.dropdown-account-switcher-header-label-regional'
+                    );
+                    return {
+                        marketplace_id: String(globalThis.ue_mid || ''),
+                        label: header ? String(header.innerText || header.textContent || '').trim() : '',
+                    };
+                }"""
+            )
+        except Exception as exc:
+            print(f"[检测] 读取当前市场标识失败: {type(exc).__name__}")
+            return None
+
+        if not isinstance(signals, dict):
+            return None
+        id_code = self._marketplace_from_id(signals.get("marketplace_id"))
+        label_code = self._marketplace_from_label(signals.get("label"))
+        if id_code and label_code and id_code != label_code:
+            print(
+                "[检测] 当前市场标识冲突: "
+                f"marketplace_id={id_code}, header={label_code}"
+            )
+            return None
+        return label_code or id_code
     
     def get_current_marketplace(self) -> Optional[str]:
         """
@@ -226,37 +292,31 @@ class MarketplaceSwitcher:
             Optional[str]: 当前市场代码，如果无法检测则返回 None
         """
         current_url = self.page.url
-        
-        # 方法1: 从 URL 中的 mkid 检测（最准确）
-        mkid_match = __import__('re').search(r'mons_sel_mkid=([^&]+)', current_url)
-        if mkid_match:
-            mkid = mkid_match.group(1)
-            code = self.MKID_MAP.get(mkid)
-            if code:
-                self.current_marketplace = code
-                return code
-        
-        # 方法2: 从 URL 域名检测
-        if "sellercentral.amazon.co.uk" in current_url:
-            try:
-                page_text = self.page.evaluate('() => document.body.innerText || ""')
-                for code in ["UK", "BE", "NL", "SE", "DE", "FR", "ES", "IT", "PL"]:
-                    info = MARKETPLACE_CONFIG[code]
-                    if info.name in page_text:
-                        self.current_marketplace = code
-                        return code
-            except:
-                pass
-            return "UK"
-        elif "sellercentral.amazon.com.mx" in current_url:
-            return "MX"
-        elif "sellercentral.amazon.ca" in current_url:
-            return "CA"
-        elif "sellercentral.amazon.com" in current_url:
-            # amazon.com 可能是 US 或 MX，优先检查 mkid，如果无 mkid 默认 US
-            return "US"
-        
-        return self.current_marketplace
+
+        mkid_match = re.search(r"mons_sel_mkid=([^&]+)", current_url)
+        url_code = self._marketplace_from_id(mkid_match.group(1)) if mkid_match else None
+        page_code = self._detect_active_marketplace_from_page()
+
+        if url_code and page_code and url_code != page_code:
+            print(
+                "[检测] URL 与页面市场不一致: "
+                f"url={url_code}, page={page_code}；拒绝快速通过"
+            )
+            self.current_marketplace = None
+            return None
+
+        code = page_code or url_code
+        if not code:
+            # These domains identify a single marketplace.  amazon.com and
+            # amazon.co.uk are intentionally excluded because several active
+            # marketplaces share each hostname.
+            if "sellercentral.amazon.com.mx" in current_url:
+                code = "MX"
+            elif "sellercentral.amazon.ca" in current_url:
+                code = "CA"
+
+        self.current_marketplace = code
+        return code
     
     def select_best_marketplace(self, target: str, brand_name: Optional[str] = None) -> str:
         """
@@ -351,7 +411,7 @@ class MarketplaceSwitcher:
                 return True, target
         
         if is_account_switcher:
-            print(f"[市场切换] 当前在 account-switcher 页面，需要执行切换")
+            print("[市场切换] 当前在 account-switcher 页面，需要执行切换")
         
         # 尝试切换
         for attempt in range(1, max_retries + 1):
@@ -370,17 +430,17 @@ class MarketplaceSwitcher:
                     else:
                         print(f"[市场切换] ⚠️ 切换后验证失败，实际市场: {actual}")
                         if attempt < max_retries:
-                            print(f"[市场切换] 等待后重试...")
+                            print("[市场切换] 等待后重试...")
                             time.sleep(5)
                             continue
                         else:
                             return False, f"验证失败: 期望 {target}, 实际 {actual}"
                 
                 elif success:
-                    print(f"[市场切换] [OK] 切换完成（未验证）")
+                    print("[市场切换] [OK] 切换完成（未验证）")
                     return True, target
                 else:
-                    print(f"[市场切换] [FAIL] 切换操作失败")
+                    print("[市场切换] [FAIL] 切换操作失败")
                     if attempt < max_retries:
                         time.sleep(5)
                         continue
@@ -501,60 +561,19 @@ class MarketplaceSwitcher:
         """
         print(f"[验证] 验证是否切换到 {expected}...")
         
-        # 方法1: 检查 URL
-        current_url = self.page.url
-        expected_info = MARKETPLACE_CONFIG.get(expected)
-        
-        if expected_info and expected_info.domain in current_url:
-            # URL 匹配，进一步确认具体国家
-            actual = self._detect_country_from_page()
-            if actual == expected:
-                return True, actual
-            elif actual:
-                print(f"[验证] URL 匹配但国家不匹配: 期望 {expected}, 实际 {actual}")
-                return False, actual
-        
-        # 方法2: 检查页面文本
-        actual = self._detect_country_from_page()
+        # Shared Seller Central domains are not proof of the selected country.
+        # Require an explicit mkid, page marketplace ID, or exact header label.
+        actual = self.get_current_marketplace()
         if actual == expected:
             return True, actual
-        
-        # 方法3: 检查页面上的市场标识
-        try:
-            page_text = self.page.evaluate('() => document.body.innerText || ""')
-            expected_name = MARKETPLACE_CONFIG.get(expected, {}).name
-            
-            if expected_name and expected_name in page_text:
-                return True, expected
-            elif actual:
-                return False, actual
-        except:
-            pass
-        
+        if actual:
+            print(f"[验证] 国家不匹配: 期望 {expected}, 实际 {actual}")
+            return False, actual
         return False, "unknown"
     
     def _detect_country_from_page(self) -> Optional[str]:
-        """从页面检测当前国家"""
-        try:
-            # 检查 URL 参数
-            current_url = self.page.url
-            mkid_match = re.search(r'mons_sel_mkid=([^&]+)', current_url)
-            if mkid_match:
-                mkid = mkid_match.group(1)
-                # 根据 mkid 前缀判断国家（这需要映射表）
-                # 暂时跳过
-            
-            # 检查页面上的国家文本
-            page_text = self.page.evaluate('() => document.body.innerText || ""')
-            
-            for code, info in MARKETPLACE_CONFIG.items():
-                if info.name in page_text:
-                    return code
-                    
-        except Exception as e:
-            print(f"[检测] 从页面检测国家失败: {e}")
-        
-        return None
+        """Backward-compatible wrapper around strict active-market detection."""
+        return self.get_current_marketplace()
     
     def switch_to_best_marketplace(self, preferred: str, brand_name: Optional[str] = None,
                                    max_retries: int = 3) -> Tuple[bool, str]:
@@ -587,7 +606,7 @@ class MarketplaceSwitcher:
             print(f"[智能切换] 已经在 {preferred} 市场，无需切换")
             return True, preferred
         if is_account_switcher:
-            print(f"[智能切换] 当前在 account-switcher 页面，需要执行切换")
+            print("[智能切换] 当前在 account-switcher 页面，需要执行切换")
         
         # 步骤1: 检测可用市场（传入目标市场以选择正确切换页面域名）
         self.detect_available_marketplaces(preferred)
