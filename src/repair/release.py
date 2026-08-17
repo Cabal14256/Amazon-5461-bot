@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from contextlib import AbstractContextManager
 from pathlib import Path
 
+from src.state_files import atomic_write_json
 from src.windows_subprocess import no_window_kwargs
 
 _GIT_AUTHOR = ("Amazon5461 Release Bot", "codex-release@localhost")
@@ -45,6 +45,7 @@ class RepositoryReleaseLock(AbstractContextManager):
     def __init__(self, settings, *, job_id: int, operation: str):
         self.repo = Path(settings.repo_root).resolve()
         self.path = self.repo / ".git" / "codex-release.lock"
+        self.metadata_path = self.repo / ".git" / "codex-release.lock.meta.json"
         self.job_id = int(job_id)
         self.operation = str(operation)
         self._handle = None
@@ -70,15 +71,14 @@ class RepositoryReleaseLock(AbstractContextManager):
             handle.close()
             raise ReleaseConflict("release_locked") from exc
         self._handle = handle
-        metadata = json.dumps(
-            {"pid": os.getpid(), "job_id": self.job_id, "operation": self.operation},
-            ensure_ascii=True,
-        ).encode("ascii")
-        handle.seek(0)
-        handle.truncate()
-        handle.write(metadata)
-        handle.flush()
-        handle.seek(0)
+        try:
+            atomic_write_json(
+                self.metadata_path,
+                {"pid": os.getpid(), "job_id": self.job_id, "operation": self.operation},
+            )
+        except Exception:
+            self.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, exc_type, exc, traceback):
@@ -86,6 +86,7 @@ class RepositoryReleaseLock(AbstractContextManager):
         if handle is None:
             return False
         try:
+            self.metadata_path.unlink(missing_ok=True)
             handle.seek(0)
             if os.name == "nt":
                 import msvcrt
@@ -109,6 +110,11 @@ class RepositoryReleaseLock(AbstractContextManager):
 
 def current_head(settings) -> str:
     return _sha(Path(settings.repo_root).resolve())
+
+
+def is_worktree_clean(settings) -> bool:
+    repo = Path(settings.repo_root).resolve()
+    return not bool(_git(repo, "status", "--porcelain").stdout.strip())
 
 
 def is_expected_release_merge(settings, *, expected_head: str, target_sha: str) -> bool:

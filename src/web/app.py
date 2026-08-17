@@ -16,6 +16,7 @@ job directly in ``queued``.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
@@ -48,6 +49,8 @@ from src.web.auth import LoginRateLimiter
 from src.web.config import WebSettings, load_settings
 from src.web.deps import require_role
 from src.web.loop_noise import install_loop_noise_filter
+
+logger = logging.getLogger(__name__)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -91,8 +94,10 @@ def create_app(
             from src.repair.release_recovery import reconcile_git_operations
 
             reconcile_git_operations(settings)
-        except ImportError:
-            pass
+        except Exception:
+            # Keep the console available for manual recovery, while the
+            # persisted operation/job state remains fail-closed.
+            logger.exception("Startup Git reconciliation failed")
         manager.recover()
         manager.start()
         # Stage-6 auto-triage scanner: fully degraded no-op while disabled.

@@ -10,6 +10,7 @@ from src.codex_client.availability import CodexAvailability
 from src.db import get_incident, init_db, record_incident, set_incident_evidence_bundle
 from src.incidents import assess_evidence_bundle, build_evidence_bundle
 from src.web.config import WebSettings
+from tests.evidence_fixtures import dom_contract, previous_success
 
 
 def _env(tmp_path, *, complete: bool):
@@ -24,11 +25,12 @@ def _env(tmp_path, *, complete: bool):
     if complete:
         kwargs = {
             "selectors": {"declared_candidates": ["kat-button"], "probes": {"count": 1}},
-            "dom_contract": {"schema_version": 1, "nodes": [{"tag": "kat-button"}]},
-            "previous_success": {"contract_hash": "a" * 64, "contract": {"nodes": [{"tag": "kat-button"}]}},
+            "dom_contract": dom_contract(),
+            "previous_success": previous_success(),
         }
     bundle = build_evidence_bundle(
-        int(incident["id"]), evidence, page_evidence={"visible_text": "Apply"}, **kwargs,
+        int(incident["id"]), evidence, page_evidence={"visible_text": "Apply"},
+        run_context={"marketplace": "US", "flow_type": "5461"}, **kwargs,
     )
     gate = assess_evidence_bundle(bundle)
     set_incident_evidence_bundle(
@@ -77,3 +79,62 @@ def test_repair_uat_incomplete_evidence_refuses_before_job(tmp_path, monkeypatch
     conn.close()
     assert code == 2
     assert jobs == 0
+
+
+def test_repair_uat_revalidates_files_instead_of_trusting_ready_db(tmp_path, monkeypatch):
+    settings, incident = _env(tmp_path, complete=True)
+    bundle = settings.evidence_root / "incidents" / str(incident["id"])
+    (bundle / "dom-contract.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr("src.web.config.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "src.codex_client.availability.check_availability",
+        lambda _command: CodexAvailability(True, version="fixture"),
+    )
+
+    code = cmd_repair_uat(
+        argparse.Namespace(incident_id=incident["id"], check_only=False, json=True)
+    )
+
+    refreshed = get_incident(str(settings.db_path), int(incident["id"]))
+    assert code == 2
+    assert refreshed["evidence_status"] == "incomplete"
+    assert "dom_shadow_contract" in refreshed["missing_evidence"]
+
+
+def test_repair_uat_refuses_unresolved_git_reconciliation(tmp_path, monkeypatch):
+    settings, incident = _env(tmp_path, complete=True)
+    monkeypatch.setattr("src.web.config.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "src.codex_client.availability.check_availability",
+        lambda _command: CodexAvailability(True, version="fixture"),
+    )
+    monkeypatch.setattr(
+        "src.db.count_unresolved_git_reconciliation", lambda _db_path: 1
+    )
+
+    code = cmd_repair_uat(
+        argparse.Namespace(incident_id=incident["id"], check_only=True, json=True)
+    )
+
+    assert code == 2
+
+
+def test_repair_uat_reports_reconciliation_audit_failure_as_internal(tmp_path, monkeypatch):
+    settings, incident = _env(tmp_path, complete=True)
+    monkeypatch.setattr("src.web.config.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "src.repair.release_recovery.reconcile_git_operations",
+        lambda _settings: [
+            {"operation_id": 1, "outcome": "adopted_release", "audit_error": True}
+        ],
+    )
+    monkeypatch.setattr(
+        "src.codex_client.availability.check_availability",
+        lambda _command: CodexAvailability(True, version="fixture"),
+    )
+
+    code = cmd_repair_uat(
+        argparse.Namespace(incident_id=incident["id"], check_only=True, json=True)
+    )
+
+    assert code == 1

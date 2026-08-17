@@ -241,6 +241,7 @@ def cmd_repair_uat(args: argparse.Namespace) -> int:
     from src.db import (
         INCIDENT_REPAIR_CLASSES,
         count_triage_jobs_today,
+        count_unresolved_git_reconciliation,
         get_incident,
         init_db,
         record_web_audit,
@@ -257,16 +258,34 @@ def cmd_repair_uat(args: argparse.Namespace) -> int:
     try:
         init_db(str(settings.db_path))
         recover_stale_triage_jobs(str(settings.db_path))
-        try:
-            from src.repair.release_recovery import reconcile_git_operations
+        from src.repair.release_recovery import reconcile_git_operations
 
-            reconcile_git_operations(settings)
-        except ImportError:
-            pass
+        reconciliation = reconcile_git_operations(settings)
+        reconciliation_audit_failed = any(
+            bool(item.get("audit_error")) for item in reconciliation
+        )
+        checks.append(
+            {
+                "name": "git_reconciliation_clear",
+                "ok": (
+                    count_unresolved_git_reconciliation(str(settings.db_path)) == 0
+                    and not reconciliation_audit_failed
+                ),
+            }
+        )
 
         incident = get_incident(str(settings.db_path), incident_id)
+        if incident is not None:
+            from src.incidents.evidence_bundle import refresh_incident_evidence_gate
+
+            incident = (
+                refresh_incident_evidence_gate(str(settings.db_path), incident_id)
+                or incident
+            )
         checks.append({"name": "incident_exists", "ok": incident is not None})
-        if incident is None:
+        if reconciliation_audit_failed:
+            outcome, exit_code = "reconciliation_audit_failed", 1
+        elif incident is None:
             outcome, exit_code = "unknown_incident", 2
         else:
             required_checks = (
