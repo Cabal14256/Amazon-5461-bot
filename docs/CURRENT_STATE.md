@@ -419,12 +419,17 @@ Stage 7 (isolated patch generation) is implemented
   and the full diff in the existing `DiffViewer`. The role-aware Stage-8 panel
   shows each validation gate, Canary evidence/log artifacts, approval history,
   release/revert SHAs and only the actions legal for the current state.
-- Evidence-bundle backfill: `scripts/backfill_incident_bundles.py`
-  (dry-run default, `--write` to persist) rebuilt bundles for all 183
-  replay-created incidents from historical batch-state files
-  (state trace + run context; DOM/screenshot artifacts honestly marked
-  absent). Known limitation: redaction over-mangles timestamps inside the
-  trace (digit runs match the phone pattern) — safe but noisy.
+- Evidence bundles use manifest v2 with four explicit gates, exact
+  flow/marketplace/page-family/evidence-node matching and per-file SHA-256.
+  Triage, patch, Repair Center detail and `repair-uat` re-read the files instead
+  of trusting a stored ready flag. Legacy/incomplete incidents remain
+  `waiting_evidence` until genuine selector probes, bounded DOM/open-Shadow
+  contract and an exact previous-success fixture exist.
+- Evidence-bundle backfill: `scripts/backfill_incident_bundles.py` is dry-run by
+  default and reports aggregate counts only. It scans normal batch state plus
+  nested reapplication state. `--write` is an explicitly authorized operation;
+  old manifests and success fixtures are not accepted until they pass v2
+  sanitization, hash and dimension validation.
 - Codex never reads the original evidence directory directly. Each Stage-6
   triage job and Stage-7 repair worktree receives a text-only sanitized copy;
   account, brand, profile, Case/SKU fields and raw screenshot paths are removed.
@@ -464,4 +469,14 @@ Stage 7 (isolated patch generation) is implemented
   dead-PID recovery, fail-closed validation, log redaction, Canary ordering and
   no-submit job types, approval permission/state guards, temp-repository merge,
   HEAD drift, dirty worktrees and revert behavior.
+- Release/revert operations now keep a fixed-byte OS lock plus separate lock
+  metadata, force mismatched jobs into reconciliation-required in the same DB
+  transaction, reject dirty post-Git adoption, and only report adopted after
+  the operation/job finalization commits. Startup audit failures do not undo a
+  completed reconciliation; Repair UAT treats them as exit code 1.
+- Declined-Case Web authorization is idempotent before preflight: repeats
+  return the persisted route and never start a second worker. Job and Case
+  tables use deterministic server-time parsing; job counts are explicitly
+  execution counts rather than approval counts. Vitest/happy-dom coverage is
+  included in Windows CI, including the production DOM contract collector.
 - Stage 9 hardening and the one-week controlled trial have not started.

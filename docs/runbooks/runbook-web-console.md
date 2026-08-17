@@ -284,18 +284,23 @@ web:
 
 ### 10.4 证据包
 
-每个 incident 生成 `runtime/evidence/incidents/<id>/`：manifest、
+每个 incident 生成 `runtime/evidence/incidents/<id>/`：manifest v2、
 page-summary/visible-text/run-context（均二次脱敏，页面文本包裹
 UNTRUSTED 标记）、relevant-selectors、screenshot-withheld（阶段 5 默认
-不提供截图，只记录原图私有路径）。下载走现有 `/api/evidence/file`
-allowlist。
+不提供截图，只记录是否捕获过原图）。manifest 最后原子写入，保存四项门禁、
+非敏感匹配维度及每个证据文件的 SHA-256；读取门禁时会重新读取文件并验 hash，
+不信任数据库或旧 manifest 中的 ready 结论。下载走现有
+`/api/evidence/file` allowlist。
 
 Codex 判因前执行严格完整性门禁：page summary、selector 候选及 probe、
 脱敏 DOM/开放 Shadow DOM contract、同站点同页面族成功 fixture 缺一不可。
 不完整的 incident 标记为 `waiting_evidence`，Web 显示“等待补证”，自动和
 手动判因都不会创建 repair job 或消耗调用额度。可用
-`python scripts/backfill_incident_bundles.py` 先 dry-run 检查历史来源，再用
-`--write` 写入并重新评估门禁。
+`python scripts/backfill_incident_bundles.py` 先 dry-run 检查历史来源。默认只输出
+聚合计数，不打印账号、品牌或私密路径；它同时扫描普通批次状态和
+`runtime/state/reapplications/**`。只有得到单独写入授权时才使用 `--write`，并可
+配合 `--incident-id <id>` 精确重新评估。旧 manifest/v1 fixture、hash 不匹配、
+错误站点或页面阶段一律保持 incomplete，绝不人工制造 previous-success。
 
 ### 10.5 回放验证与关闭
 
@@ -343,10 +348,13 @@ baseline、repair 分支 HEAD 等于请求确认的 patch SHA、状态为
 不建 PR。合并后状态是 `release_pending_restart`，Web 进程绝不自我重启。
 
 审批时会先在 SQLite 持久化 `releasing` 意图，再持有 `.git/codex-release.lock`
-跨进程锁执行 Git。进程若在 merge/revert 与最终写库之间崩溃，下一次 Web
+的固定锁字节执行 Git；PID/job/operation 说明写在独立的
+`.git/codex-release.lock.meta.json`。进程若在 merge/revert 与最终写库之间崩溃，下一次 Web
 启动或 `repair-uat` 会核对 HEAD：严格匹配目标提交则补齐状态，Git 尚未发生
 则恢复审批前状态；其他 HEAD 一律进入 reconciliation-required，禁止自动
-reset、重复 merge 或重复 revert。
+reset、重复 merge 或重复 revert。即使 HEAD 可证明为目标 merge/revert，只要
+工作树已脏也不自动接纳；operation/job 状态竞争同样转人工对账。Web 启动时
+对账异常只记日志并保持 fail-closed，控制台仍可用于人工恢复。
 
 重启服务后，用 Admin 调用 `post-release-check`。后端拒绝与合并时相同的
 进程 PID，并再次校验 HEAD/工作树和服务调度器健康，再创建一次 post-release
@@ -370,7 +378,9 @@ revert 时返回 409 并停止。真实补丁 UAT 应保持 `release_enabled=fal
 命令固定先执行数据库迁移、遗留 triage/release 对账、证据完整性、功能开关、
 Codex 可用性、额度与 `release_enabled=false` 检查。`--check-only` 不创建 job；
 默认模式最多执行一次只读判因，不生成补丁、不打开浏览器、不提交申请。
-退出码：0 通过，2 为门禁/业务拒绝，1 为内部或审计失败。
+`git_reconciliation_clear` 要求没有锁冲突、pending operation 或
+reconciliation-required job。退出码：0 通过，2 为门禁/业务拒绝，1 为内部或
+审计失败。
 
 ## 12. 何时可以关闭命令行窗口
 

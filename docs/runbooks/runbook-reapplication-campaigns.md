@@ -28,6 +28,19 @@ submission is impossible unless the campaign itself has
 `submit_authorized=1`. The supported CLI requires both `--submit` and `--yes`,
 plus an explicit account, brand, and region.
 
+The Web console also lets Reviewer/Admin users start from one completed Case
+whose normalized result is exactly `declined`. Account, brand, source site,
+route and next site are derived again on the server. The first request must
+confirm the exact remaining configured route, pass submit preflight and have
+no conflicting active campaign. It records the declined Case as the completed
+source attempt and schedules only the next site.
+
+`source_case_followup_id` is the idempotency key. Once a campaign exists, a
+repeat POST returns that persisted campaign and route with `created=false`,
+`preflight=[]` and worker reason `existing_campaign`; it does not rerun
+preflight or launch another worker, and request data cannot rewrite the route.
+Historical declined Cases are never converted automatically.
+
 Read-only preflight (no database write, browser launch, or submission):
 
 ```powershell
