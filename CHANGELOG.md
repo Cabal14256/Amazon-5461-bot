@@ -2,6 +2,11 @@
 
 ## 2026-08-16
 
+- Keep `false_approved`, `pending`, and `verification_pending` Case tasks in
+  scheduled follow-up until effective approval, explicit rejection, or the
+  global six-check limit; unresolved sixth checks move to manual review and do
+  not advance reapplication routes.
+- Add `假过` to the Excel registry status dictionary with a dedicated style.
 - Consolidated all active evidence output under `runtime/evidence/` and moved
   the remaining legacy top-level evidence into that partition without
   overwriting existing files.

@@ -989,10 +989,11 @@ def reopen_case_followup_for_retry(
     scheduled_at: Optional[str] = None,
     reason: str = "operator_requested_retry",
 ) -> bool:
-    """Reopen a terminal/manual Case task without creating a duplicate.
+    """Reopen a recoverable Case task without creating a duplicate.
 
     This is a local recovery operation only. The subsequent worker reads the
-    existing Case; it does not submit or resubmit an application.
+    existing Case; it does not submit or resubmit an application. Completed
+    tasks are only recoverable here when their recorded result is false approval.
     """
     scheduled_at = scheduled_at or now_str()
     now = now_str()
@@ -1001,7 +1002,10 @@ def reopen_case_followup_for_retry(
         """UPDATE case_followups
            SET status='retry', scheduled_at=?, completed_at=NULL,
                error=?, claimed_pid=NULL, updated_at=?
-           WHERE id=? AND status IN ('manual_review', 'failed')""",
+           WHERE id=? AND (
+               status IN ('manual_review', 'failed')
+               OR (status='completed' AND final_result='false_approved')
+           )""",
         (scheduled_at, str(reason or "operator_requested_retry")[:500], now, int(followup_id)),
     )
     changed = cur.rowcount > 0

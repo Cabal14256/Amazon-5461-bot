@@ -68,7 +68,7 @@ def test_declined_advances_eu_route_exactly_two_hours(tmp_path):
     assert campaigns[0]["current_route_index"] == 1
 
 
-def test_false_approved_advances_from_us_to_mx(tmp_path):
+def test_false_approved_keeps_same_case_followup_active(tmp_path):
     settings = _settings(tmp_path)
     campaign = create_campaign(
         settings,
@@ -85,8 +85,45 @@ def test_false_approved_advances_from_us_to_mx(tmp_path):
         now=datetime(2026, 8, 10, 14, 0, 0),
     )
 
-    assert result["status"] == "next_scheduled"
-    assert result["next_site"] == "MX"
+    assert result["status"] == "waiting_case"
+    assert result["site"] == "US"
+    campaigns = list_campaigns(settings)
+    assert campaigns[0]["status"] == "waiting_case"
+    assert campaigns[0]["current_route_index"] == 0
+    attempt = get_attempt(settings, campaign["attempt"]["id"])
+    assert attempt["status"] == "waiting_case"
+    assert attempt["final_result"] is None
+
+
+def test_false_approved_followup_exhaustion_pauses_campaign(tmp_path):
+    settings = _settings(tmp_path)
+    campaign = create_campaign(
+        settings,
+        "us_store_002",
+        "DEMO_WILL",
+        "NA",
+        submit_authorized=True,
+    )
+
+    result = handle_case_outcome(
+        settings,
+        _task(campaign),
+        {
+            "result": "false_approved",
+            "decision_reason": "six automatic checks exhausted",
+            "automatic_followup_exhausted": True,
+        },
+        now=datetime(2026, 8, 10, 15, 0, 0),
+    )
+
+    assert result["status"] == "paused"
+    assert result["reason"] == "case_followup_attempt_limit_reached:false_approved"
+    campaigns = list_campaigns(settings)
+    assert campaigns[0]["status"] == "paused"
+    assert campaigns[0]["stop_reason"] == result["reason"]
+    attempt = get_attempt(settings, campaign["attempt"]["id"])
+    assert attempt["status"] == "manual_review"
+    assert attempt["final_result"] == "false_approved"
 
 
 def test_last_route_rejection_stops_as_route_exhausted(tmp_path):
@@ -110,7 +147,7 @@ def test_last_route_rejection_stops_as_route_exhausted(tmp_path):
     assert list_campaigns(settings)[0]["status"] == "route_exhausted"
 
 
-def test_last_route_false_approval_also_stops_as_route_exhausted(tmp_path):
+def test_last_route_false_approval_keeps_same_case_followup_active(tmp_path):
     settings = _settings(tmp_path)
     campaign = create_campaign(
         settings,
@@ -127,7 +164,9 @@ def test_last_route_false_approval_also_stops_as_route_exhausted(tmp_path):
         {"result": "false_approved", "decision_reason": "not effective"},
     )
 
-    assert result["status"] == "route_exhausted"
+    assert result["status"] == "waiting_case"
+    assert result["site"] == "MX"
+    assert list_campaigns(settings)[0]["status"] == "waiting_case"
 
 
 def test_approved_stops_campaign_as_passed(tmp_path):

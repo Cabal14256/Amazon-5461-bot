@@ -1,8 +1,9 @@
 """Effective approval checks for an Amazon Case that says it was approved.
 
 An explicit Case approval is only a trigger for these checks.  It is not an
-effective approval by itself.  A real approval requires either an explicit
-Connect brand approval, or both of the following:
+effective approval by itself.  Unless a brand is explicitly configured for
+the Add Product-only rule, a real approval requires either an explicit Connect
+brand approval, or both of the following:
 
 * the brand is visible in Seller Central's Manage Your Brands page; and
 * Add Product can advance from Product Identity to Description.
@@ -117,8 +118,17 @@ def get_approved_verification_config(settings: dict[str, Any]) -> dict[str, Any]
         "allow_new_ui_submit_as_continue": True,
     }
     add_product_config.update(configured.get("add_product") or {})
+    configured_add_product_only_brands = configured.get("add_product_only_brands") or []
+    if isinstance(configured_add_product_only_brands, str):
+        configured_add_product_only_brands = [configured_add_product_only_brands]
+    add_product_only_brands = [
+        str(brand_name).strip()
+        for brand_name in configured_add_product_only_brands
+        if str(brand_name).strip()
+    ]
     return {
         "enabled": bool(configured.get("enabled", True)),
+        "add_product_only_brands": add_product_only_brands,
         "manage_brand": manage_config,
         "add_product": add_product_config,
     }
@@ -1119,7 +1129,11 @@ def verify_add_product(
 
 
 def combine_approved_verification(
-    manage_brand: dict[str, Any], add_product: dict[str, Any]
+    manage_brand: dict[str, Any],
+    add_product: dict[str, Any],
+    *,
+    brand_name: str = "",
+    add_product_only_brands: list[str] | None = None,
 ) -> dict[str, Any]:
     """Combine checks without treating a stale brand portfolio as a failure."""
     manage_result = str(manage_brand.get("result") or "unknown")
@@ -1128,6 +1142,20 @@ def combine_approved_verification(
         f"Manage Brand: {manage_brand.get('reason') or manage_result}; "
         f"Add Product: {add_product.get('reason') or add_result}"
     )
+    normalized_brand = _normalize_text(brand_name)
+    add_product_only = normalized_brand and normalized_brand in {
+        _normalize_text(value) for value in (add_product_only_brands or [])
+    }
+    if add_product_only and add_result == ADD_PRODUCT_PASS:
+        return {
+            "result": "approved",
+            "is_success": True,
+            "reason": (
+                f"{reason}; 品牌例外规则: {brand_name} 以 Add Product "
+                "进入 Description 为通过依据"
+            ),
+        }
+
     # The explicit Connect brand panel is decisive when the portfolio omitted
     # the brand.  It intentionally overrides any earlier Add Product result.
     if manage_result == MANAGE_CONNECT_APPROVED:
@@ -1238,7 +1266,12 @@ def verify_approved_case(
             except Exception:
                 pass
 
-    combined = combine_approved_verification(manage_result, add_result)
+    combined = combine_approved_verification(
+        manage_result,
+        add_result,
+        brand_name=brand_name,
+        add_product_only_brands=config["add_product_only_brands"],
+    )
     evidence_files = list(manage_result.get("evidence_files") or []) + list(
         add_result.get("evidence_files") or []
     )

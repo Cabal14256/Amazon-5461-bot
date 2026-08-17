@@ -114,6 +114,12 @@ Test a binding without submitting or changing Feishu:
   300-second per-call timeout.
 - No Amazon message becomes `pending` and is rescheduled after
   `retry_interval_hours`.
+- Only effective `approved` and explicit `declined` results complete a Case
+  follow-up automatically. `false_approved`, `pending`, and
+  `verification_pending` remain on the same Case and are rescheduled after
+  `retry_interval_hours` until the global `max_attempts` limit (6, including
+  the first automatic check). If check 6 is still unresolved, the task keeps
+  its exact result, moves to `manual_review`, and receives no further schedule.
 - Before opening AdsPower, a task whose exact account/site/brand already has a
   canonical effective `approved` status is completed as an approved skip. A
   `false_approved`, `Answered`, pending, unknown, or technical state is never
@@ -145,7 +151,7 @@ Read one Case without changing records:
   --account us_store_000 --site BE --brand DEMO_WILL --case-id 12345678901
 ```
 
-Read and register one terminal result:
+Read and register one explicit result:
 
 ```powershell
 .\.venv\Scripts\python.exe -m cli.amazon5461 case-check `

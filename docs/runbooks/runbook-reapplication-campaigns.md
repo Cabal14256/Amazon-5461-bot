@@ -4,9 +4,14 @@
 
 - NA: `US -> MX`
 - EU: `UK -> BE -> DE -> SE -> NL -> FR`
-- `declined` and `false_approved` schedule the next site after two hours.
+- Only explicit `declined` schedules the next site after two hours.
 - `approved` stops the campaign as `passed`.
-- A rejection or false approval at the last site stops as `route_exhausted`.
+- `false_approved`, `pending`, and `verification_pending` keep the current
+  attempt in `waiting_case`; the same Case continues to be checked until an
+  effective approval or explicit rejection is confirmed, up to the global
+  six-check limit. An unresolved sixth check pauses the campaign for manual
+  review instead of advancing the route.
+- A rejection at the last site stops as `route_exhausted`.
 - `action_required`, `answered_unknown`, login/CAPTCHA/2FA blocks, missing Case
   IDs, browser failures, rate limits, and other technical failures pause or
   retry the current site. They never advance the route.

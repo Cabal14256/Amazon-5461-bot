@@ -77,6 +77,11 @@ Before any browser check, an exact account/site/brand already recorded as
 effectively `approved` is completed without reopening its Case. This shortcut
 does not apply to `false_approved`, `Answered`, pending, unknown, or technical
 states.
+Only an effective `approved` result or an explicit `declined` result completes
+automatic follow-up. `false_approved`, `pending`, and `verification_pending`
+stay on the same Case and continue at `retry_interval_hours` for at most six
+automatic checks in total. If check 6 is still unresolved, the exact result is
+preserved as `manual_review` and no further automatic check is scheduled.
 Unclassified Amazon replies use deterministic multilingual templates first,
 then a read-only Codex classifier. Transient Codex timeout/unavailable/process/
 schema failures receive one delayed retry tracked independently from Case
@@ -127,13 +132,14 @@ from CDP failures and never change a business result.
 
 ## Finite reapplication routes
 
-Explicitly authorized campaigns can now continue a declined or effectively
-false-approved application through a finite regional route: `US -> MX` for NA,
-and `UK -> BE -> DE -> SE -> NL -> FR` for EU. The next site is scheduled two
-hours after the Case result. Approval stops the campaign; failure at the last
-site becomes `route_exhausted`. Manual/unknown Case replies and every technical
-failure pause rather than advance. Campaign and attempt rows are linked to the
-exact Case follow-up in SQLite, and each attempt has unique state and log files.
+Explicitly authorized campaigns can continue an explicitly declined
+application through a finite regional route: `US -> MX` for NA, and
+`UK -> BE -> DE -> SE -> NL -> FR` for EU. The next site is scheduled two hours
+after the rejection. Effective approval stops the campaign; rejection at the
+last site becomes `route_exhausted`. False approval stays on the same linked
+Case in `waiting_case`; manual/unknown Case replies and every technical failure
+pause rather than advance. Campaign and attempt rows are linked to the exact
+Case follow-up in SQLite, and each attempt has unique state and log files.
 
 The campaign CLI requires the account, brand, region, `--submit`, and `--yes`
 before any real run can be dispatched. A command without `--submit` is a
@@ -248,6 +254,7 @@ Stage 4 (real submission) is implemented on top of the same queue:
   Amazon-side no-op by design. It found no authorization entry and stopped
   `uncertain` with zero ledger side effects. A real submission to a brand that
   actually needs authorization still requires separate explicit authorization.
+
 Stage 5 (persistent incident detection) is implemented:
 
 - Failure signals now persist in the `repair_incidents` table with

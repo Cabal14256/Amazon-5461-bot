@@ -36,7 +36,8 @@ case_followup:
   delay_hours: 2.0
   retry_interval_hours: 1.0
   error_retry_interval_hours: 1.0
-  max_attempts: 12
+  # Includes the first automatic check; unresolved tasks stop after check 6.
+  max_attempts: 6
   poll_interval_seconds: 60
   connection_circuit_breaker: true
   auto_start_worker: true
@@ -55,6 +56,11 @@ case_followup:
     max_attempts: 2
     retry_interval_minutes: 5
     forbidden_retry_interval_minutes: 30
+  # Only these exact brands may treat Add Product reaching Description as
+  # decisive even when Manage Your Brands / Connect brand disagrees.
+  approved_verification:
+    add_product_only_brands:
+      - "MoShieldwish"
 
 # Recover a missing Case ID from the correct regional View Selling
 # Applications page before any business outcome or reapplication decision.

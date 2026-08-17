@@ -25,8 +25,9 @@ DEFAULT_ROUTES = {
     "NA": ("US", "MX"),
     "EU": ("UK", "BE", "DE", "SE", "NL", "FR"),
 }
-ADVANCE_RESULTS = {"declined", "false_approved"}
+ADVANCE_RESULTS = {"declined"}
 PASS_RESULTS = {"approved"}
+WAIT_RESULTS = {"false_approved", "pending", "verification_pending"}
 PAUSE_RESULTS = {"action_required", "answered_unknown", "blocked"}
 ACTIVE_CAMPAIGN_STATUSES = {
     "scheduled",
@@ -368,6 +369,49 @@ def handle_case_outcome(
             "campaign_status": str(current["status"]),
             "reason": str(current["stop_reason"] or ""),
         }
+
+    if outcome in WAIT_RESULTS:
+        if result.get("automatic_followup_exhausted"):
+            pause_reason = "case_followup_attempt_limit_reached:" + outcome
+            conn.execute(
+                """UPDATE reapplication_attempts
+                   SET status='manual_review', final_result=?,
+                       decision_reason=?, completed_at=?, updated_at=?
+                   WHERE id=?""",
+                (outcome, reason, timestamp, timestamp, int(attempt_id)),
+            )
+            conn.execute(
+                """UPDATE reapplication_campaigns
+                   SET status='paused', stop_reason=?,
+                       completed_at=NULL, updated_at=?
+                   WHERE id=?""",
+                (pause_reason, timestamp, int(campaign_id)),
+            )
+            conn.commit()
+            conn.close()
+            return {
+                "status": "paused",
+                "site": str(row["site"]),
+                "outcome": outcome,
+                "reason": pause_reason,
+            }
+        conn.execute(
+            """UPDATE reapplication_attempts
+               SET status='waiting_case', final_result=NULL,
+                   decision_reason=?, completed_at=NULL, updated_at=?
+               WHERE id=?""",
+            (reason, timestamp, int(attempt_id)),
+        )
+        conn.execute(
+            """UPDATE reapplication_campaigns
+               SET status='waiting_case', stop_reason=NULL,
+                   completed_at=NULL, updated_at=?
+               WHERE id=?""",
+            (timestamp, int(campaign_id)),
+        )
+        conn.commit()
+        conn.close()
+        return {"status": "waiting_case", "site": str(row["site"]), "outcome": outcome}
 
     attempt_status = "completed" if outcome in PASS_RESULTS | ADVANCE_RESULTS else "manual_review"
     conn.execute(

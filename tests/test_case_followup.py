@@ -697,7 +697,7 @@ def test_pending_result_is_rescheduled_without_registration(monkeypatch, tmp_pat
         "case_followup": {
             "retry_interval_hours": 6,
             "error_retry_interval_hours": 1,
-            "max_attempts": 3,
+            "max_attempts": 6,
             "registration_path": str(tmp_path / "registry.xlsx"),
         },
     }
@@ -718,6 +718,45 @@ def test_pending_result_is_rescheduled_without_registration(monkeypatch, tmp_pat
     assert row["status"] == "retry"
     assert row["attempt_count"] == 1
     assert row["scheduled_at"] > datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_pending_result_stops_after_configured_followup_limit(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    timestamp = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    followup_id, _ = enqueue_case_followup(
+        db_path, "us_store_000", "US", "ExampleBrand", "19999999991", timestamp, timestamp
+    )
+    task = claim_due_case_followups(db_path, limit=1)[0]
+    settings = {
+        "paths": {"db_path": db_path},
+        "case_followup": {
+            "retry_interval_hours": 1,
+            "error_retry_interval_hours": 1,
+            "max_attempts": 1,
+            "registration_path": str(tmp_path / "registry.xlsx"),
+        },
+    }
+    monkeypatch.setattr(
+        case_followup,
+        "check_case_detail",
+        lambda *args, **kwargs: {
+            "result": "pending",
+            "case_status": "Open",
+            "decision_reason": "no Amazon reply",
+            "evidence_dir": "runtime/evidence/example",
+        },
+    )
+
+    result = case_followup.process_claimed_followup(settings, task, update_records=False)
+
+    assert result["automatic_followup_exhausted"] is True
+    assert "1 次上限" in result["decision_reason"]
+    row = next(item for item in list_case_followups(db_path) if item["id"] == followup_id)
+    assert row["status"] == "manual_review"
+    assert row["final_result"] == "pending"
+    assert row["completed_at"] is not None
+    assert row["error"] == "automatic_followup_attempt_limit_reached"
 
 
 def test_ai_timeout_retries_once_then_moves_to_manual_review(monkeypatch, tmp_path):
@@ -832,7 +871,31 @@ def test_operator_can_reopen_manual_followup_without_duplicate(tmp_path):
     assert row["completed_at"] is None
 
 
-def test_false_approved_is_terminal_and_registered(monkeypatch, tmp_path):
+def test_operator_can_reopen_completed_false_approval_without_duplicate(tmp_path):
+    db_path = str(tmp_path / "ledger.db")
+    init_db(db_path)
+    timestamp = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    followup_id, _ = enqueue_case_followup(
+        db_path, "us_store_000", "US", "ExampleBrand", "19999999992", timestamp, timestamp
+    )
+    finish_case_followup(
+        db_path,
+        followup_id,
+        "completed",
+        "false_approved",
+        "Answered",
+        "approval was not effective",
+        "runtime/evidence/example",
+    )
+
+    assert reopen_case_followup_for_retry(db_path, followup_id) is True
+    row = next(item for item in list_case_followups(db_path) if item["id"] == followup_id)
+    assert row["status"] == "retry"
+    assert row["final_result"] == "false_approved"
+    assert row["completed_at"] is None
+
+
+def test_false_approved_is_registered_and_rescheduled(monkeypatch, tmp_path):
     db_path = str(tmp_path / "ledger.db")
     init_db(db_path)
     timestamp = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -863,16 +926,20 @@ def test_false_approved_is_terminal_and_registered(monkeypatch, tmp_path):
     monkeypatch.setattr(
         case_followup,
         "record_case_outcome",
-        lambda _settings, _task, result: recorded.append(result["result"]),
+        lambda _settings, _task, result, **kwargs: recorded.append(
+            (result["result"], kwargs.get("transition_reapplication"))
+        ),
     )
 
     result = case_followup.process_claimed_followup(settings, task, update_records=True)
 
     assert result["result"] == "false_approved"
-    assert recorded == ["false_approved"]
+    assert recorded == [("false_approved", False)]
     row = next(item for item in list_case_followups(db_path) if item["id"] == followup_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "retry"
     assert row["final_result"] == "false_approved"
+    assert row["completed_at"] is None
+    assert row["scheduled_at"] > datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def test_schedule_persists_unique_feishu_record_binding(monkeypatch, tmp_path):

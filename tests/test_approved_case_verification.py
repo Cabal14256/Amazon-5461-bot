@@ -30,6 +30,33 @@ def test_missing_manage_brand_waits_for_connect_brand_probe():
     assert result["is_success"] is None
 
 
+@pytest.mark.parametrize(
+    "manage_result",
+    ["found", "not_found", "connect_approved", "connect_failed", "connect_unknown", "unknown"],
+)
+def test_add_product_only_brand_pass_is_decisive(manage_result):
+    result = combine_approved_verification(
+        _check(manage_result),
+        _check("pass"),
+        brand_name="moshieldwish",
+        add_product_only_brands=["MoShieldwish"],
+    )
+    assert result["result"] == "approved"
+    assert result["is_success"] is True
+    assert "品牌例外规则" in result["reason"]
+
+
+def test_add_product_only_brand_without_add_product_pass_keeps_existing_logic():
+    result = combine_approved_verification(
+        _check("connect_unknown"),
+        _check("fail"),
+        brand_name="MoShieldwish",
+        add_product_only_brands=["MoShieldwish"],
+    )
+    assert result["result"] == "verification_pending"
+    assert result["is_success"] is None
+
+
 @pytest.mark.parametrize("add_result", ["pass", "fail", "unknown", "blocked"])
 def test_connect_brand_approval_is_decisive(add_result):
     result = combine_approved_verification(
@@ -97,6 +124,20 @@ def test_nested_configuration_keeps_safe_defaults():
     assert config["manage_brand"]["connect_brand"]["enabled"] is True
     assert "screen protector" in config["manage_brand"]["connect_brand"]["category_keywords"]
     assert config["add_product"]["allow_new_ui_submit_as_continue"] is True
+    assert config["add_product_only_brands"] == []
+
+
+def test_add_product_only_brand_configuration_is_trimmed():
+    config = get_approved_verification_config(
+        {
+            "case_followup": {
+                "approved_verification": {
+                    "add_product_only_brands": [" MoShieldwish ", ""],
+                }
+            }
+        }
+    )
+    assert config["add_product_only_brands"] == ["MoShieldwish"]
 
 
 def test_brand_manifest_description_overrides_generic_connect_keywords(tmp_path):

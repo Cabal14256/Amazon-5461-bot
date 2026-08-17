@@ -43,9 +43,10 @@ from .registration import RegistrationManager
 from .windows_subprocess import no_window_kwargs
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-TERMINAL_RESULTS = {"approved", "declined", "false_approved"}
+TERMINAL_RESULTS = {"approved", "declined"}
+CONFIRMED_OBSERVATIONS = TERMINAL_RESULTS | {"false_approved"}
 MANUAL_RESULTS = {"action_required", "answered_unknown"}
-PENDING_RESULTS = {"pending", "verification_pending"}
+PENDING_RESULTS = {"pending", "verification_pending", "false_approved"}
 
 
 class CaseFollowupBlocked(RuntimeError):
@@ -67,7 +68,7 @@ def get_case_followup_config(settings: dict[str, Any] | None = None) -> dict[str
         "delay_hours": 24.0,
         "retry_interval_hours": 6.0,
         "error_retry_interval_hours": 1.0,
-        "max_attempts": 12,
+        "max_attempts": 6,
         "poll_interval_seconds": 60,
         "connection_circuit_breaker": True,
         "auto_start_worker": True,
@@ -796,7 +797,35 @@ def schedule_case_followup(
     }
 
 
-def record_case_outcome(settings: dict[str, Any], task: dict[str, Any], result: dict[str, Any]) -> None:
+def _handle_reapplication_transition(
+    settings: dict[str, Any],
+    task: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    try:
+        from .reapplication import handle_case_outcome, launch_reapplication_worker
+
+        transition = handle_case_outcome(settings, task, result)
+        result["reapplication_transition"] = transition
+        if transition.get("status") == "next_scheduled":
+            result["reapplication_worker"] = launch_reapplication_worker(settings)
+    except Exception as exc:  # Never change the authoritative Case result.
+        result["reapplication_transition"] = {
+            "status": "error",
+            "reason": (
+                "unexpected reapplication transition error: "
+                f"{exc.__class__.__name__}"
+            ),
+        }
+
+
+def record_case_outcome(
+    settings: dict[str, Any],
+    task: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    transition_reapplication: bool = True,
+) -> None:
     outcome = result.get("result") or "answered_unknown"
     reason = _redact_emails(result.get("decision_reason") or "")[:500]
     db_path = _db_path(settings)
@@ -821,7 +850,7 @@ def record_case_outcome(settings: dict[str, Any], task: dict[str, Any], result: 
         ),
         result=outcome,
         summary_text=reason,
-        confidence_points=100 if outcome in TERMINAL_RESULTS else 50,
+        confidence_points=100 if outcome in CONFIRMED_OBSERVATIONS else 50,
     )
     upsert_case_outcome_status(
         db_path,
@@ -868,18 +897,8 @@ def record_case_outcome(settings: dict[str, Any], task: dict[str, Any], result: 
             "reason": f"unexpected progress update error: {exc.__class__.__name__}",
         }
 
-    try:
-        from .reapplication import handle_case_outcome, launch_reapplication_worker
-
-        transition = handle_case_outcome(settings, task, result)
-        result["reapplication_transition"] = transition
-        if transition.get("status") == "next_scheduled":
-            result["reapplication_worker"] = launch_reapplication_worker(settings)
-    except Exception as exc:  # Never change the authoritative Case result.
-        result["reapplication_transition"] = {
-            "status": "error",
-            "reason": f"unexpected reapplication transition error: {exc.__class__.__name__}",
-        }
+    if transition_reapplication:
+        _handle_reapplication_transition(settings, task, result)
 
 
 def process_claimed_followup(
@@ -1026,6 +1045,52 @@ def process_claimed_followup(
         finish_case_followup(
             db_path, task["id"], "blocked", outcome, case_status, reason, evidence_path, error=reason
         )
+    elif outcome in PENDING_RESULTS:
+        attempts = int(task.get("attempt_count") or 1)
+        max_attempts = max(1, int(config["max_attempts"]))
+        exhausted = attempts >= max_attempts
+        if exhausted:
+            reason = f"{reason}；自动复查已达到 {max_attempts} 次上限，不再自动复查"
+            result["decision_reason"] = reason
+            result["automatic_followup_exhausted"] = True
+            finish_case_followup(
+                db_path,
+                task["id"],
+                "manual_review",
+                outcome,
+                case_status,
+                reason,
+                evidence_path,
+                error="automatic_followup_attempt_limit_reached",
+            )
+        else:
+            retry_hours = float(config["retry_interval_hours"])
+            next_run = _db_datetime(
+                datetime.now() + timedelta(hours=max(0.1, retry_hours))
+            )
+            reschedule_case_followup(
+                db_path,
+                task["id"],
+                next_run,
+                outcome,
+                case_status,
+                reason,
+                evidence_path,
+            )
+            result["rescheduled_at"] = next_run
+        if (
+            outcome == "false_approved"
+            and update_records
+            and str(task.get("final_result") or "") != "false_approved"
+        ):
+            record_case_outcome(
+                settings,
+                task,
+                result,
+                transition_reapplication=False,
+            )
+        if exhausted and update_records:
+            _handle_reapplication_transition(settings, task, result)
     else:
         attempts = int(task.get("attempt_count") or 1)
         max_attempts = max(1, int(config["max_attempts"]))
@@ -1041,11 +1106,7 @@ def process_claimed_followup(
                 error=reason,
             )
         else:
-            retry_hours = (
-                float(config["retry_interval_hours"])
-                if outcome in PENDING_RESULTS
-                else float(config["error_retry_interval_hours"])
-            )
+            retry_hours = float(config["error_retry_interval_hours"])
             next_run = _db_datetime(datetime.now() + timedelta(hours=max(0.1, retry_hours)))
             reschedule_case_followup(
                 db_path,

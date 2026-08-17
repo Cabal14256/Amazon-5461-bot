@@ -32,7 +32,7 @@ class RegistrationManager:
     ]
     
     # 状态选项
-    STATUS_OPTIONS = ['申请中', '已通过', '已拒绝', '待补充材料', '待人工复核', '已取消']
+    STATUS_OPTIONS = ['申请中', '已通过', '假过', '已拒绝', '待补充材料', '待人工复核', '已取消']
     
     def __init__(self, registry_path: Optional[str] = None):
         self.registry_path = Path(registry_path or self.DEFAULT_REGISTRY_PATH)
@@ -131,6 +131,9 @@ class RegistrationManager:
                 if status == '已通过':
                     cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
                     cell.font = Font(color="006100")
+                elif status == '假过':
+                    cell.fill = PatternFill(start_color="F4B183", end_color="F4B183", fill_type="solid")
+                    cell.font = Font(color="9C5700")
                 elif status == '已拒绝':
                     cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
                     cell.font = Font(color="9C0006")
@@ -180,6 +183,9 @@ class RegistrationManager:
                 if new_status == '已通过':
                     status_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
                     status_cell.font = Font(color="006100")
+                elif new_status == '假过':
+                    status_cell.fill = PatternFill(start_color="F4B183", end_color="F4B183", fill_type="solid")
+                    status_cell.font = Font(color="9C5700")
                 elif new_status == '已拒绝':
                     status_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
                     status_cell.font = Font(color="9C0006")
