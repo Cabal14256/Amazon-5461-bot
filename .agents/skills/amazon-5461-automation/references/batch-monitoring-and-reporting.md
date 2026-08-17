@@ -322,6 +322,18 @@ done
 Use whichever file exists. Do not assume `submit_full/final_state.png` is
 always present — check both paths before declaring "no evidence found".
 
+## Unresolved submission results auto-skip and continue (2026-08-16)
+
+For a multi-brand real run, `Draft`, `partial`, `unknown`,
+`submitted_no_case_id_pending_dashboard`, or a Dashboard `draft` result no
+longer stops the whole batch. The current brand remains `failed` with its exact
+business result, its tab and evidence stay open for review, and the normal
+inter-brand cooldown runs before processing the next brand.
+
+This continuation is not a success inference: never report the unresolved
+brand as submitted, and reconcile it separately against Dashboard / Selling
+Applications before any retry.
+
 ## Non-interactive mode auto-skip on 429 failure
 
 When the batch runs in background (stdin EOF / non-interactive), a brand that

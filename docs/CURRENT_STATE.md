@@ -255,6 +255,13 @@ Stage 4 (real submission) is implemented on top of the same queue:
   `uncertain` with zero ledger side effects. A real submission to a brand that
   actually needs authorization still requires separate explicit authorization.
 
+- Multi-brand runs now continue after a failed brand, including an unresolved
+  `Draft`, `partial`, `unknown`, or submitted-without-Case-ID result. The failed
+  item keeps its exact non-success state, its tab and evidence are retained for
+  review, and the normal inter-brand cooldown runs before the next brand. An
+  unresolved result is never promoted to success merely because the batch
+  continued.
+
 Stage 5 (persistent incident detection) is implemented:
 
 - Failure signals now persist in the `repair_incidents` table with

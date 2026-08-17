@@ -1,5 +1,9 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$WebHost = '',
+    [ValidateRange(0, 65535)]
+    [int]$WebPort = 0
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -32,9 +36,16 @@ $stdoutPath = Join-Path $logsDirectory "web_console_$stamp.out.log"
 $stderrPath = Join-Path $logsDirectory "web_console_$stamp.err.log"
 
 $env:PYTHONUTF8 = '1'
+$serverArguments = @("`"$serverScript`"")
+if ($WebHost) {
+    $serverArguments += @('--host', $WebHost)
+}
+if ($WebPort -gt 0) {
+    $serverArguments += @('--port', [string]$WebPort)
+}
 $process = Start-Process `
     -FilePath $pythonPath `
-    -ArgumentList @("`"$serverScript`"") `
+    -ArgumentList $serverArguments `
     -WorkingDirectory $projectRoot `
     -WindowStyle Hidden `
     -RedirectStandardOutput $stdoutPath `

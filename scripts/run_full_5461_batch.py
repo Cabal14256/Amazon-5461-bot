@@ -1207,10 +1207,9 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
                 print()
                 print("=" * 70)
                 print(f"[!] 品牌 {item['brand_name']} 未确认提交完成: status={unresolved_status or 'unknown'}, dashboard={unresolved_dash_status or 'unknown'}")
-                print("    页面已保留。为避免中断仍在转圈的提交请求或继续触发限流，批次暂停。")
-                print("    请先在 AdsPower 中人工确认/提交/等待 Case ID，再决定是否继续后续品牌。")
+                print("    当前品牌保持 failed，页面保留供人工复核。")
+                print("    批次将在品牌间冷却后自动跳过当前品牌，继续申请后续品牌。")
                 print("=" * 70)
-                break
 
             # --- 429/410001 暂停机制 ---
             # 结合结构化网络事件判断；忽略 Katal/监控遥测端点的孤立 429。

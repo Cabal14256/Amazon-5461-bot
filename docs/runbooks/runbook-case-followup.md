@@ -240,9 +240,14 @@ On Windows, install the model-free five-minute health check once:
 powershell -ExecutionPolicy Bypass -File scripts\install_case_followup_healthcheck.ps1
 ```
 
-It only checks the persisted queue/worker PID and starts the hidden worker when
-needed. It does not inspect Amazon itself and does not replace platform safety
-controls.
+The scheduled task runs the windowless
+`scripts/run_case_followup_healthcheck_task.ps1` wrapper. The wrapper starts
+`run_case_followups.py --watch`, redirects stdout/stderr to timestamped files
+under `runtime/logs/`, and waits for the worker to exit. Keeping the task-owned
+wrapper alive avoids Windows Task Scheduler terminating a detached grandchild
+when a short-lived launcher exits. If the worker exits or crashes, the next
+five-minute trigger starts it again; overlapping triggers are ignored while a
+healthy worker is still running. It does not replace platform safety controls.
 
 Detached follow-up workers use the Windows system timezone. The launcher
 deliberately removes an inherited `TZ` environment variable on Windows because

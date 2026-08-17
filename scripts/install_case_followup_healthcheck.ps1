@@ -4,17 +4,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$pythonPath = Join-Path $projectRoot '.venv\Scripts\pythonw.exe'
-$healthScript = Join-Path $PSScriptRoot 'healthcheck_case_followup_worker.py'
+$taskRunner = Join-Path $PSScriptRoot 'run_case_followup_healthcheck_task.ps1'
+$powershellPath = (Get-Command powershell.exe -ErrorAction Stop).Source
 $taskName = 'Amazon5461-CaseFollowupHealth'
 
-if (-not (Test-Path -LiteralPath $pythonPath)) {
-    throw "Windowless project Python not found: $pythonPath"
+if (-not (Test-Path -LiteralPath $taskRunner)) {
+    throw "Case follow-up task runner not found: $taskRunner"
 }
 
 $action = New-ScheduledTaskAction `
-    -Execute $pythonPath `
-    -Argument ('"{0}"' -f $healthScript) `
+    -Execute $powershellPath `
+    -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $taskRunner) `
     -WorkingDirectory $projectRoot
 $trigger = New-ScheduledTaskTrigger `
     -Once `
@@ -30,7 +30,7 @@ Register-ScheduledTask `
     -Action $action `
     -Trigger $trigger `
     -Settings $settings `
-    -Description 'Keeps the Amazon 5461 Case follow-up worker available without a model watchdog.' `
+    -Description 'Runs and waits for the Amazon 5461 Case follow-up worker every five minutes without a model watchdog.' `
     -Force | Out-Null
 
 Write-Output "installed=$taskName interval_minutes=$IntervalMinutes"

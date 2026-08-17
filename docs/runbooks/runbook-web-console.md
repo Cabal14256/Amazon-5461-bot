@@ -90,7 +90,7 @@ Python 控制台窗口，并把 stdout/stderr 分别写入带时间戳的
 $projectRoot = "C:\Users\Admin\Documents\Amazon-5461-bot"
 $launcher = Join-Path $projectRoot "scripts\start_web_console_hidden.ps1"
 $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-$arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcher`""
+$arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcher`" -WebHost 0.0.0.0 -WebPort 8080"
 $action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments -WorkingDirectory $projectRoot
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
@@ -105,6 +105,11 @@ Register-ScheduledTask -TaskName "Amazon5461-WebConsole" -Action $action `
 
 注册后可在 Windows“任务计划程序”中查看 `Amazon5461-WebConsole`。
 任务只负责启动控制台，不会自动创建或执行 Amazon 提交任务。
+`0.0.0.0` 保留局域网访问；仅需本机访问时可改为 `127.0.0.1`。
+
+不要再从 VS Code 的持久终端长期运行 `run_web_console.py`，否则 VS Code
+重启时会复活旧终端并启动第二套服务。仓库工作区已设置
+`terminal.integrated.enablePersistentSessions: false`，避免该重复入口。
 
 ## 6. 备份注意（WAL）
 
