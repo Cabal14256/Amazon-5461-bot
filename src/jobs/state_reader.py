@@ -29,6 +29,14 @@ def batch_state_summary(payload: Any) -> dict[str, Any]:
                 "status": item.get("status"),
                 "case_id": result.get("case_id"),
                 "result_status": result.get("status"),
+                "dashboard_status": (
+                    (result.get("dashboard_check") or {}).get("status")
+                    if isinstance(result.get("dashboard_check"), dict)
+                    else None
+                ),
+                "started_at": item.get("started_at"),
+                "finished_at": item.get("completed_at"),
+                "note": result.get("note") or result.get("error") or item.get("error"),
             })
     return {
         "created_at": payload.get("created_at"),
@@ -49,10 +57,10 @@ def job_items_from_batch_state(payload: Any) -> list[dict[str, Any]]:
             "run_status": item.get("status"),
             "business_status": item.get("result_status"),
             "case_id": item.get("case_id"),
-            "dashboard_status": None,
+            "dashboard_status": item.get("dashboard_status"),
             "evidence_root": None,
-            "started_at": None,
-            "finished_at": None,
-            "note": None,
+            "started_at": item.get("started_at"),
+            "finished_at": item.get("finished_at"),
+            "note": item.get("note"),
         })
     return rows

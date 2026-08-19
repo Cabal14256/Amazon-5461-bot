@@ -7,6 +7,7 @@ from src.db import (
     count_running_automation_jobs,
     create_automation_job,
     get_automation_job,
+    get_conn,
     list_active_automation_jobs,
     list_automation_job_items,
     list_automation_jobs,
@@ -55,6 +56,34 @@ def test_create_and_get_roundtrip(job_env):
     assert fetched["account_id"] == ACTIVE_ACCOUNT
 
 
+def test_submit_options_roundtrip_and_old_jobs_default_empty(job_env):
+    db = str(job_env.db_path)
+    submit = _create(
+        db,
+        job_type="submit",
+        options={
+            "case_followup_delay_hours": 3.5,
+            "case_followup_enabled": False,
+        },
+    )
+    assert submit["options"] == {
+        "case_followup_delay_hours": 3.5,
+        "case_followup_enabled": False,
+    }
+
+    legacy_shape = _create(db, job_id="job-20260810-nooptions")
+    assert legacy_shape["options"] == {}
+
+
+def test_db_rejects_unknown_job_options(job_env):
+    with pytest.raises(ValueError, match="unknown_job_options"):
+        _create(
+            str(job_env.db_path),
+            job_type="submit",
+            options={"unsafe_option": "nope"},
+        )
+
+
 def test_claim_is_atomic_and_fifo(job_env):
     db = str(job_env.db_path)
     first = _create(db, job_id="job-20260810-00000001")
@@ -68,6 +97,31 @@ def test_claim_is_atomic_and_fifo(job_env):
     assert claim_next_queued_automation_job(db) is None
     release_automation_job_claim(db, first["id"])
     assert get_automation_job(db, first["id"])["run_status"] == "queued"
+
+
+def test_claim_skips_auth_blocked_account_without_starving_other_account(job_env):
+    db = str(job_env.db_path)
+    blocked = _create(db, job_id="job-20260810-blocked")
+    other = _create(
+        db,
+        job_id="job-20260810-other",
+        account_id="us_store_other",
+    )
+    conn = get_conn(db)
+    conn.execute(
+        """INSERT INTO account_auth_blocks(
+               profile_key, account_id, block_type, phase, source_type,
+               status, submit_fenced, detected_at, created_at, updated_at
+           ) VALUES ('fixture-blocked', ?, 'login_required', 'before_submit',
+                     'automation_job', 'open', 0, ?, ?, ?)""",
+        (blocked["account_id"], "2026-08-18 10:00:00", "2026-08-18 10:00:00", "2026-08-18 10:00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    claimed = claim_next_queued_automation_job(db)
+    assert claimed["id"] == other["id"]
+    assert get_automation_job(db, blocked["id"])["run_status"] == "queued"
 
 
 def test_update_whitelists_columns(job_env):

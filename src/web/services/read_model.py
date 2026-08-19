@@ -58,6 +58,12 @@ _BATCH_ITEM_STATUS_MAP = {
     "running": "under_review",
 }
 
+_AUTOMATION_VISIBLE_STATUSES = {
+    "waiting_login": "waiting_login",
+    "waiting_reconciliation": "waiting_reconciliation",
+    "manual_review": "manual_review",
+}
+
 
 def _resolution(status: str, source: str, detail: str | None = None,
                 checked_at: str | None = None) -> dict[str, Any]:
@@ -69,24 +75,128 @@ def _resolution(status: str, source: str, detail: str | None = None,
     }
 
 
-def _latest_case_reply(db_path: str, account_id: str, marketplace: str,
-                       brand_name: str) -> dict[str, Any] | None:
+def _latest_automation(
+    db_path: str,
+    account_id: str,
+    marketplace: str,
+    brand_name: str,
+) -> dict[str, Any] | None:
+    """Return the durable submit boundary and linked login interruption."""
+
     conn = get_conn(db_path)
     row = conn.execute(
-        """SELECT final_result, case_status, decision_reason, updated_at, status
-           FROM case_followups
-           WHERE account_id=? AND UPPER(marketplace)=UPPER(?) AND brand_name=? COLLATE NOCASE
-             AND final_result IS NOT NULL AND final_result != ''
-           ORDER BY datetime(updated_at) DESC, id DESC LIMIT 1""",
+        """SELECT c.*, b.block_type, b.status AS auth_block_status,
+                  b.detected_at, b.last_checked_at, b.next_check_at,
+                  b.evidence_path
+           FROM submission_checkpoints c
+           LEFT JOIN account_auth_blocks b ON b.id=c.auth_block_id
+           WHERE c.account_id=? AND UPPER(c.marketplace)=UPPER(?)
+             AND c.brand_name=? COLLATE NOCASE
+           ORDER BY datetime(c.updated_at) DESC, c.id DESC LIMIT 1""",
         (account_id, marketplace, brand_name),
     ).fetchone()
+    if row is None:
+        conn.close()
+        return None
+    data = dict(row)
+    timeline: list[dict[str, Any]] = []
+    if data.get("owner_type") == "reapplication_attempt":
+        attempt = conn.execute(
+            """SELECT a.id, a.campaign_id, a.route_index, a.site, a.status,
+                      a.scheduled_at, a.started_at, a.submitted_at, a.completed_at,
+                      a.case_id, a.final_result, a.decision_reason, a.error
+               FROM reapplication_attempts a WHERE a.id=?""",
+            (int(data["owner_id"]),),
+        ).fetchone()
+        if attempt:
+            campaign_id = int(attempt["campaign_id"])
+            timeline = [
+                dict(item)
+                for item in conn.execute(
+                    """SELECT route_index, site, status, scheduled_at, started_at,
+                              submitted_at, completed_at, case_id, final_result,
+                              decision_reason, error
+                       FROM reapplication_attempts WHERE campaign_id=?
+                       ORDER BY route_index""",
+                    (campaign_id,),
+                ).fetchall()
+            ]
+            data["campaign_id"] = campaign_id
+            data["attempt"] = dict(attempt)
+    conn.close()
+
+    status = str(data.get("status") or "")
+    phase = str(data.get("phase") or "")
+    if status == "active" and data.get("resumed_at"):
+        public_status = "resolved"
+    else:
+        public_status = _AUTOMATION_VISIBLE_STATUSES.get(status, status)
+    fenced = bool(data.get("submit_click_fenced_at"))
+    if public_status == "waiting_login":
+        next_action = "登录恢复后继续当前站点，不推进下一站"
+    elif public_status == "waiting_reconciliation":
+        next_action = "不会重复提交；核对 Selling Applications/Case"
+    elif public_status == "manual_review":
+        next_action = "结果存在歧义，需要人工确认"
+    elif public_status == "resolved":
+        next_action = "登录已恢复，已安排自动处理"
+    elif public_status == "completed" and phase == "dashboard_approved":
+        next_action = "已通过 Selling Applications 对账确认"
+    elif fenced:
+        next_action = "等待 Case 或控制面板确认结果"
+    else:
+        next_action = "继续当前站点表单处理"
+    return {
+        "checkpoint_id": int(data["id"]),
+        "owner_type": data.get("owner_type"),
+        "owner_id": data.get("owner_id"),
+        "status": public_status,
+        "phase": phase,
+        "current_site": str(data.get("marketplace") or "").upper(),
+        "submit_intent_at": data.get("submit_intent_at"),
+        "submit_click_fenced_at": data.get("submit_click_fenced_at"),
+        "resumed_at": data.get("resumed_at"),
+        "submit_fenced": fenced,
+        "auth_block_id": data.get("auth_block_id"),
+        "block_type": data.get("block_type"),
+        "detected_at": data.get("detected_at"),
+        "last_checked_at": data.get("last_checked_at"),
+        "next_check_at": data.get("next_check_at"),
+        "evidence_path": data.get("evidence_path"),
+        "next_action": next_action,
+        "campaign_id": data.get("campaign_id"),
+        "attempt": data.get("attempt"),
+        "timeline": timeline,
+        "case_id": data.get("case_id"),
+        "updated_at": data.get("updated_at"),
+        "detail": data.get("detail"),
+    }
+
+
+def _latest_case_reply(db_path: str, account_id: str, marketplace: str,
+                       brand_name: str, *, case_id: str | None = None) -> dict[str, Any] | None:
+    conn = get_conn(db_path)
+    sql = """SELECT final_result, case_status, decision_reason, updated_at, status
+             FROM case_followups
+             WHERE account_id=? AND UPPER(marketplace)=UPPER(?) AND brand_name=? COLLATE NOCASE
+               AND final_result IS NOT NULL AND final_result != ''"""
+    params: list[Any] = [account_id, marketplace, brand_name]
+    if case_id:
+        sql += " AND case_id=?"
+        params.append(str(case_id))
+    sql += " ORDER BY datetime(updated_at) DESC, id DESC LIMIT 1"
+    row = conn.execute(sql, params).fetchone()
     conn.close()
     if not row:
         return None
-    status = _CASE_OUTCOME_RANK.get(str(row["final_result"]), "under_review")
+    final_result = str(row["final_result"])
+    status = _CASE_OUTCOME_RANK.get(final_result, "under_review")
+    # A worker/browser failure is authoritative for the local run state, but it
+    # is not text returned by Amazon.  Keep it out of the UI's Case-reply field.
+    source = "case_followup_error" if final_result in {"error", "blocked"} else "case_reply"
     return _resolution(
         status,
-        "case_reply",
+        source,
         detail=str(row["decision_reason"] or "")[:300] or None,
         checked_at=str(row["updated_at"] or "") or None,
     )
@@ -108,13 +218,15 @@ def _latest_case_id_recovery(db_path: str, account_id: str, marketplace: str,
     dashboard = str(row["dashboard_status"] or "").lower()
     if dashboard in {"approved", "declined", "false_approved"}:
         status = dashboard
+        source = "dashboard_reconciliation"
     elif row["case_id"]:
         status = "under_review"
+        source = "case_id_recovery"
     else:
         return None
     return _resolution(
         status,
-        "case_reply",
+        source,
         detail=str(row["decision_reason"] or "")[:300] or None,
         checked_at=str(row["updated_at"] or "") or None,
     )
@@ -232,8 +344,25 @@ def resolve_brand_status(
     """Return the authoritative status + source for one account/site/brand."""
     today = today or datetime.now().strftime("%Y-%m-%d")
 
+    automation = _latest_automation(db_path, account_id, marketplace, brand_name)
+    if automation and automation["status"] in {
+        "waiting_login", "waiting_reconciliation", "manual_review", "resolved"
+    }:
+        return _resolution(
+            str(automation["status"]),
+            "automation_checkpoint",
+            detail=str(automation.get("next_action") or ""),
+            checked_at=str(automation.get("updated_at") or "") or None,
+        )
+
     for probe in (
-        lambda: _latest_case_reply(db_path, account_id, marketplace, brand_name),
+        lambda: _latest_case_reply(
+            db_path,
+            account_id,
+            marketplace,
+            brand_name,
+            case_id=str(automation.get("case_id") or "") if automation else None,
+        ),
         lambda: _latest_case_id_recovery(db_path, account_id, marketplace, brand_name),
         lambda: _dashboard_today(db_path, account_id, marketplace, brand_name, today),
         lambda: _submission_with_case(db_path, account_id, marketplace, brand_name),
@@ -286,19 +415,94 @@ def list_applications(
 
     conn = get_conn(db_path)
     rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    checkpoint_rows = [
+        dict(r)
+        for r in conn.execute(
+            """SELECT account_id, marketplace, brand_name,
+                      COALESCE(submit_click_fenced_at, submit_intent_at, created_at) AS submitted_at,
+                      case_id, status AS submit_result
+               FROM submission_checkpoints
+               ORDER BY datetime(updated_at) DESC, id DESC"""
+        ).fetchall()
+    ]
     conn.close()
 
-    results: list[dict[str, Any]] = []
-    for row in rows:
-        resolution = resolve_brand_status(
-            db_path,
-            row["account_id"],
-            row["marketplace"],
-            row["brand_name"],
-            data_root=data_root,
+    existing_keys = {
+        (str(row["account_id"]), str(row["marketplace"]).upper(), str(row["brand_name"]).casefold())
+        for row in rows
+    }
+    for checkpoint_row in checkpoint_rows:
+        key = (
+            str(checkpoint_row["account_id"]),
+            str(checkpoint_row["marketplace"]).upper(),
+            str(checkpoint_row["brand_name"]).casefold(),
         )
+        if key in existing_keys:
+            continue
+        if account_id and checkpoint_row["account_id"] != account_id:
+            continue
+        if marketplace and str(checkpoint_row["marketplace"]).upper() != marketplace.upper():
+            continue
+        if brand_name and str(checkpoint_row["brand_name"]).casefold() != brand_name.casefold():
+            continue
+        checkpoint_date = str(checkpoint_row.get("submitted_at") or "")
+        if date_from and checkpoint_date < date_from:
+            continue
+        date_to_bound = date_to + " 23:59:59" if date_to and len(date_to) == 10 else date_to
+        if date_to_bound and checkpoint_date > date_to_bound:
+            continue
+        rows.append(checkpoint_row)
+        existing_keys.add(key)
+    rows.sort(key=lambda item: str(item.get("submitted_at") or ""), reverse=True)
+    rows = rows[: max(1, min(int(limit), 1000))]
+
+    results: list[dict[str, Any]] = []
+    automation_attached: set[tuple[str, str, str]] = set()
+    automation_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
+    for row in rows:
+        key = (
+            str(row["account_id"]),
+            str(row["marketplace"]).upper(),
+            str(row["brand_name"]).casefold(),
+        )
+        if key not in automation_cache:
+            automation_cache[key] = _latest_automation(
+                db_path, row["account_id"], row["marketplace"], row["brand_name"]
+            )
+        automation = automation_cache[key]
+        row_case_id = str(row.get("case_id") or "")
+        current_case_id = str((automation or {}).get("case_id") or "")
+        if row_case_id and current_case_id and row_case_id != current_case_id:
+            # A historical Case row keeps its own outcome.  Never attach the
+            # latest brand checkpoint/result to a different Case ID.
+            resolution = _latest_case_reply(
+                db_path,
+                row["account_id"],
+                row["marketplace"],
+                row["brand_name"],
+                case_id=row_case_id,
+            )
+            if resolution is None:
+                resolution = _resolution(
+                    _SUBMIT_RESULT_MAP.get(str(row.get("submit_result") or ""), "under_review"),
+                    "submission_case_id",
+                    checked_at=str(row.get("submitted_at") or "") or None,
+                )
+        else:
+            resolution = resolve_brand_status(
+                db_path,
+                row["account_id"],
+                row["marketplace"],
+                row["brand_name"],
+                data_root=data_root,
+            )
         if status and resolution["status"] != status:
             continue
         row["authoritative"] = resolution
+        if key not in automation_attached:
+            row["automation"] = automation
+            automation_attached.add(key)
+        else:
+            row["automation"] = None
         results.append(row)
     return results

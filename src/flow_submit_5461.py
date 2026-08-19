@@ -1,20 +1,31 @@
+import os
 import random
 import re
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from playwright.sync_api import Page, sync_playwright
 
 from .amazon_error_handler import ensure_page_ready
 from .application_type_selection import classify_application_type_text
+from .auth_guard import AuthBlockedError, detect_auth_state, ensure_not_auth_blocked
+from .auth_recovery import (
+    SubmissionReconciliationRequired,
+    capture_auth_evidence,
+    create_auth_block,
+    ensure_submission_checkpoint,
+    mark_submit_click_fenced,
+    mark_submit_intent,
+    update_checkpoint_result,
+)
 from .capture.dom_contract import capture_dom_shadow_contract
 from .email_resolver import clean_email, get_autofill_email_from_page
 from .evidence import EVIDENCE_NODES, build_evidence_dir, capture_evidence_safe, write_text
 from .human_interaction import human_click, human_type
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 _APPLICATION_REQUIRED_RE = re.compile(r"applications?\s*required", re.IGNORECASE)
@@ -36,17 +47,18 @@ def has_application_required_entry_text(text: str) -> bool:
 
 
 def _async_screenshot(page, path: str, full_page: bool = False, timeout: int = 10000) -> None:
+    """Capture optional evidence on the Playwright owner's current thread.
+
+    Playwright's synchronous Page object is greenlet-bound and cannot be used
+    from a background thread.  The historical name is retained for callers,
+    but the operation must stay synchronous to avoid corrupting in-flight page
+    operations with ``Cannot switch to a different thread`` errors.
     """
-    非关键截图异步化辅助函数。
-    在后台线程拍照，不阻塞主流程。page 对象由调用方保证在截图前不被关闭。
-    失败时静默忽略（与原有 try/except pass 保持一致）。
-    """
-    def _do():
-        try:
-            page.screenshot(path=path, full_page=full_page, timeout=timeout)
-        except Exception:
-            pass
-    threading.Thread(target=_do, daemon=True).start()
+
+    try:
+        page.screenshot(path=path, full_page=full_page, timeout=timeout)
+    except Exception:
+        pass
 
 
 def close_5461_panel(page: Page) -> dict:
@@ -544,7 +556,7 @@ def submit_5461(
             for old_page in existing_pages[:-1]:
                 try:
                     old_page.evaluate('() => { window.close(); }')
-                except:
+                except Exception:
                     pass
         else:
             page = context.new_page()
@@ -680,18 +692,18 @@ def submit_5461(
                 error_shot = evidence_dir / "error.png"
                 page.screenshot(path=str(error_shot), full_page=True, timeout=10000)
                 result["evidence_files"].append(str(error_shot))
-            except:
+            except Exception:
                 pass
         
         finally:
             if not keep_browser_open:
                 try:
                     page.close()
-                except:
+                except Exception:
                     pass
                 try:
                     browser.close()
-                except:
+                except Exception:
                     pass
             else:
                 print("[清理] 批量模式：保持浏览器开启")
@@ -705,6 +717,20 @@ def check_page_state(page) -> dict:
     根据 _scratch/submit_5461_v2.py 和 _scratch/run_541_mocodi_fixed.py 的经验
     """
     current_url = page.url
+
+    auth_state = detect_auth_state(page)
+    if auth_state.blocked:
+        return {
+            "url": current_url,
+            "page_type": "AUTH_REQUIRED",
+            "has_permission": False,
+            "needs_auth": False,
+            "has_5461_form": False,
+            "brand_blocked": False,
+            "auth_blocked": True,
+            "auth_block_type": auth_state.state,
+            "requires_human_review": True,
+        }
     
     # 使用 JS 获取页面文本，避免 inner_text 超时
     # 注意：Amazon 使用 Shadow DOM，需要用递归方式获取文本
@@ -815,7 +841,7 @@ def check_page_state(page) -> dict:
                 }
                 return getAllText(document.body);
             }''') or ''
-        except:
+        except Exception:
             pass
     
     # 检查品牌是否被封锁（Amazon 不接受申请）
@@ -1612,7 +1638,7 @@ def handle_brand_selection(page, brand_name: str, brand_keywords: list = None) -
         
         print(f"[品牌选择] 确认按钮: {connect_result}")
         if not connect_result.get('clicked'):
-            print(f"[品牌选择] ⚠️ 未找到 Connect this brand 按钮，可能 radio 未选中导致按钮仍为 disabled")
+            print("[品牌选择] ⚠️ 未找到 Connect this brand 按钮，可能 radio 未选中导致按钮仍为 disabled")
             print(f"[品牌选择] 页面上的按钮: {connect_result.get('allButtons', [])}")
             return False
         # 等待 URL 变化（跳转到 seller-qualification/description）或 panel 出现，最多 8s
@@ -1943,7 +1969,9 @@ def connect_brand_in_5461_panel(page, brand_name: str, keywords: list = None) ->
 
     except Exception as e:
         print(f"[ConnectBrand] 出错: {e}")
-        import traceback; traceback.print_exc()
+        import traceback
+
+        traceback.print_exc()
         return {'found': False, 'selected': False, 'brand_text': '', 'note': str(e)}
 
 
@@ -2493,7 +2521,7 @@ def handle_declined_case_application(page, brand_name: str, evidence_dir, filler
             'note': str,
         }
     """
-    print(f"[DeclinedHandler] 检测到 Declined 申请，尝试点击 '>' 发起新申请...")
+    print("[DeclinedHandler] 检测到 Declined 申请，尝试点击 '>' 发起新申请...")
     try:
         # 尝试在 QualificationWidget 面板内找到 Declined 卡片右侧的 “>” 链接/按钮并点击。
         # 经验规则（2026-06-06）：Declined 卡片右侧 “>” 会直接新建一个新的 5461 表单；
@@ -2792,7 +2820,7 @@ def handle_declined_case_application(page, brand_name: str, evidence_dir, filler
             return {
                 'success': False,
                 'action': 'no_new_form',
-                'note': f'Declined ► 后 NEEDS_APPROVAL_NEW_UI 状态，二次 Apply to sell 失败（未获得真实字段）',
+                'note': 'Declined ► 后 NEEDS_APPROVAL_NEW_UI 状态，二次 Apply to sell 失败（未获得真实字段）',
             }
 
         return {
@@ -2833,10 +2861,13 @@ def submit_5461_from_add_product(
     item_type_keyword: str = "cell-phone-screen-protectors",
     account_email: str = "",
     keep_browser_open: bool = False,  # 批量模式下保持浏览器开启
-    page: Optional[Page] = None,  # 复用已有页面实例
+    page: Page | None = None,  # 复用已有页面实例
     skip_market_switch: bool = False,  # 跳过市场切换（已在正确市场时使用）
     no_submit: bool = False,  # dry-run：真实走流程到提交前一步，绝不点击提交
     skip_add_product_goto: bool = False,  # 跳过 goto(add_product_url)，页面已就位时使用
+    submission_owner_type: str | None = None,
+    submission_owner_id: str | int | None = None,
+    checkpoint_db_path: str | None = None,
 ):
     """
     从 Add Product 页面开始，自动流转到 5461 表单并提交
@@ -2854,6 +2885,7 @@ def submit_5461_from_add_product(
     result = {
         "submit_result": "failed",
         "case_id": None,
+        "submission_started_at": None,
         "note": "",
         "evidence_files": [],
         "steps": [],
@@ -2861,17 +2893,46 @@ def submit_5461_from_add_product(
         "marketplace_switched": False,
         "actual_marketplace": None,
     }
+
+    checkpoint = None
+    checkpoint_db = str(
+        checkpoint_db_path
+        or os.getenv("AMAZON5461_DB_PATH")
+        or PROJECT_ROOT / "runtime" / "state" / "ledger.db"
+    )
+    owner_type = str(submission_owner_type or "").strip()
+    owner_id = str(submission_owner_id or "").strip()
+    if not owner_type or not owner_id:
+        env_job_id = os.getenv("AMAZON5461_JOB_ID", "").strip()
+        if env_job_id:
+            owner_type, owner_id = "automation_job", env_job_id
+        else:
+            owner_type = "direct_run"
+            owner_id = os.getenv("AMAZON5461_RUN_ID", "").strip() or (
+                f"{account_id}:{marketplace}:{brand_name}:{datetime.now():%Y%m%d%H%M%S%f}"
+            )
+    if not no_submit:
+        checkpoint = ensure_submission_checkpoint(
+            checkpoint_db,
+            owner_type=owner_type,
+            owner_id=owner_id,
+            account_id=account_id,
+            marketplace=marketplace,
+            brand_name=brand_name,
+            phase="started",
+        )
+        result["submission_checkpoint_id"] = int(checkpoint["id"])
     
     # 加载账号配置（用于获取 mons_sel_mkid 等）
     from .config_loader import load_account
-    acc = load_account("config/accounts.json", account_id) or {}
+    load_account("config/accounts.json", account_id)
     
     owns_page = page is None
 
     def _run_core(page):
-        nonlocal marketplace
-        from pathlib import Path
+        nonlocal marketplace, checkpoint
         import json
+        from pathlib import Path
         
         # 设置 console 监听，捕获 error/warning
         console_logs = []
@@ -2904,7 +2965,74 @@ def submit_5461_from_add_product(
             print(f"[DRY-RUN] no_submit=True：{path_desc}，跳过点击提交与 Case ID 轮询")
             return result
 
+        auth_settings = {
+            "paths": {
+                "db_path": checkpoint_db,
+                "evidence_root": evidence_root,
+            },
+            "auth_recovery": {"poll_interval_seconds": 300},
+        }
+
+        def _guard_auth(phase: str):
+            """Stop immediately on auth UI; never route it into page retries."""
+            try:
+                return ensure_not_auth_blocked(page, phase=phase)
+            except AuthBlockedError as exc:
+                evidence_path = capture_auth_evidence(
+                    page,
+                    auth_settings,
+                    account_id=account_id,
+                    phase=phase,
+                )
+                fenced = bool(checkpoint and checkpoint.get("submit_click_fenced_at"))
+                block = create_auth_block(
+                    auth_settings,
+                    account_id=account_id,
+                    marketplace=marketplace,
+                    brand_name=brand_name,
+                    block_type=exc.auth_state.state,
+                    phase=phase,
+                    source_type=owner_type,
+                    source_id=owner_id,
+                    submit_fenced=fenced,
+                    evidence_path=evidence_path,
+                    detail=exc.auth_state.reason,
+                    checkpoint_id=int(checkpoint["id"]) if checkpoint else None,
+                )
+                exc.block_id = int(block["id"])
+                result["auth_block"] = {
+                    "id": int(block["id"]),
+                    "block_type": exc.auth_state.state,
+                    "phase": phase,
+                    "submit_fenced": fenced,
+                    "evidence_path": evidence_path,
+                }
+                raise
+
+        def _safe_submit_click(phase: str, selector: str = "kat-button#submit_button") -> bool:
+            """Persist the no-reclick fence before dispatching one submit click."""
+            nonlocal checkpoint
+            if checkpoint is None:
+                raise RuntimeError("real submission has no durable checkpoint")
+            if checkpoint.get("submit_click_fenced_at"):
+                raise SubmissionReconciliationRequired(checkpoint)
+            checkpoint = mark_submit_intent(checkpoint_db, int(checkpoint["id"]), phase=phase)
+            _guard_auth(f"{phase}:before_submit")
+            checkpoint = mark_submit_click_fenced(
+                checkpoint_db,
+                int(checkpoint["id"]),
+                phase=phase,
+            )
+            result["submission_started_at"] = checkpoint.get("submit_click_fenced_at")
+            result["submit_click_fenced"] = True
+            clicked = bool(click_katal_button(page, selector))
+            result["steps"].append(
+                {"phase": phase, "action": "submit_click_fenced", "status": "dispatched" if clicked else "unknown"}
+            )
+            return clicked
+
         try:
+            _guard_auth("browser_attached")
             # 阶段 0: 切换目标国家市场
             if skip_market_switch:
                 print(f"\n[阶段 0] 跳过市场切换（skip_market_switch=True），当前市场: {marketplace}")
@@ -2920,6 +3048,7 @@ def submit_5461_from_add_product(
                     target=marketplace,
                     max_retries=3
                 )
+                _guard_auth("marketplace_switch")
                 
                 if success:
                     print(f"\n[阶段 0] ✅ 成功切换到 {actual_marketplace}")
@@ -2947,7 +3076,7 @@ def submit_5461_from_add_product(
                             a["mons_sel_mkid"] = mkid
                             break
                     accounts_path.write_text(json.dumps(accounts_data, ensure_ascii=False, indent=2), encoding="utf-8")
-                    print(f"[阶段 0] [AUTO-SAVE] 已保存 mkid 到 accounts.json")
+                    print("[阶段 0] [AUTO-SAVE] 已保存 mkid 到 accounts.json")
                 except Exception as e:
                     print(f"[阶段 0] [警告] 保存 mkid 失败: {e}")
             
@@ -3000,6 +3129,8 @@ def submit_5461_from_add_product(
                 except Exception:
                     pass
 
+                _guard_auth("add_product_navigation")
+
                 # [2026-05-18] 检测 Amazon 服务端错误页面并自动恢复
                 # 经验: DEMO_HOME 成功后，DEMO_WILL/DEMO_JADE/MP-MALL 全部遇到服务端错误，导致连锁失败
                 print("[阶段 1/3] 检查页面状态...")
@@ -3019,7 +3150,7 @@ def submit_5461_from_add_product(
                         error_shot = evidence_dir / "server_error.png"
                         _async_screenshot(page, str(error_shot), full_page=False, timeout=10000)
                         result["evidence_files"].append(str(error_shot))
-                    except:
+                    except Exception:
                         pass
                     return result
                 elif recovery_result['retries'] > 0:
@@ -3345,7 +3476,7 @@ def submit_5461_from_add_product(
                         if no_submit:
                             return _dry_run_no_submit_return(1.5, "Connect brand 早路径 阶段1.5")
                         print("[阶段 1.5] 点击提交...")
-                        click_katal_button(page, 'kat-button#submit_button')
+                        _safe_submit_click("connect_brand_early")
                         # 与阶段3保持一致：轮询等待 Case ID，最多90秒
                         print("[阶段 1.5] 等待 Case ID 出现（最多90秒）...")
                         case_id = None
@@ -3353,6 +3484,7 @@ def submit_5461_from_add_product(
                         poll_interval = 3
                         elapsed = 0
                         while elapsed < max_wait:
+                            _guard_auth("post_submit_wait")
                             case_id = extract_case_id(page)
                             if case_id:
                                 print(f"[✓] 提取到 Case ID: {case_id}")
@@ -3764,7 +3896,7 @@ def submit_5461_from_add_product(
                     shot_after_apply = evidence_dir / "02_after_apply.png"
                     _async_screenshot(page, str(shot_after_apply), full_page=True, timeout=10000)
                     result["evidence_files"].append(str(shot_after_apply))
-                except:
+                except Exception:
                     pass
                 
                 # 优先检查是否自动创建了 Case（新UI）
@@ -3839,7 +3971,7 @@ def submit_5461_from_add_product(
                         print(f"[阶段 2.5] ⚠️ 发现 Declined 申请 (Case ID: {case_id})，尝试点击 '>' 发起新申请...")
                         declined_result = handle_declined_case_application(page, brand_name, evidence_dir, filler=filler)
                         if declined_result['success']:
-                            print(f"[阶段 2.5] ✅ 已进入新申请表单，继续填写 5461...")
+                            print("[阶段 2.5] ✅ 已进入新申请表单，继续填写 5461...")
                             result["declined_recovery"] = declined_result
                             case_id = None  # 清空，让后续流程重新判断页面状态
                         else:
@@ -4331,10 +4463,11 @@ def submit_5461_from_add_product(
                                 if no_submit:
                                     return _dry_run_no_submit_return(2, "Description→BRAND_SELECTION 路径 阶段2/3")
                                 print("[阶段 2/3] 点击提交...")
-                                click_katal_button(page, 'kat-button#submit_button')
+                                _safe_submit_click("description_brand_selection")
                                 print("[阶段 2/3] 等待 Case ID 出现（最多90秒）...")
                                 case_id_bs = None
                                 for _ in range(30):
+                                    _guard_auth("post_submit_wait")
                                     case_id_bs = extract_case_id(page)
                                     if case_id_bs:
                                         print(f"[✓] 提取到 Case ID: {case_id_bs}")
@@ -4360,7 +4493,7 @@ def submit_5461_from_add_product(
                             return { hasDeclined, hasApplyToSell, hasCaseId };
                         }""")
                         if declined_check.get('hasDeclined') and declined_check.get('hasApplyToSell'):
-                            print(f"[阶段 2/3] 检测到 Apply to sell 弹窗中有 Declined 状态，尝试点击 '>' 发起新申请...")
+                            print("[阶段 2/3] 检测到 Apply to sell 弹窗中有 Declined 状态，尝试点击 '>' 发起新申请...")
                             # 先从弹窗里提取旧的 declined case id 并设到 filler 上，供 handle_declined_case_application 使用
                             if not getattr(filler, 'declined_case_id', None):
                                 filler.declined_case_id = None  # 确保属性存在
@@ -4384,10 +4517,11 @@ def submit_5461_from_add_product(
                                 if no_submit:
                                     return _dry_run_no_submit_return(2, "Description→Declined recovery 路径 阶段2/3")
                                 print("[阶段 2/3] 点击提交...")
-                                click_katal_button(page, 'kat-button#submit_button')
+                                _safe_submit_click("description_declined_recovery")
                                 print("[阶段 2/3] 等待 Case ID 出现（最多90秒）...")
                                 case_id_dr = None
                                 for _ in range(30):
+                                    _guard_auth("post_submit_wait")
                                     case_id_dr = extract_case_id(page)
                                     if case_id_dr:
                                         print(f"[✓] 提取到 Case ID: {case_id_dr}")
@@ -4591,9 +4725,8 @@ def submit_5461_from_add_product(
                     print("[阶段 3/3] 非交互环境，跳过人工确认...")
             
             # 点击提交
-            _submit_429_retried = False  # 429提交重试：每个品牌仅允许重试一次
             print("[阶段 3/3] 点击提交...")
-            click_katal_button(page, 'kat-button#submit_button')
+            _safe_submit_click("main_form")
             
             # 等待提交处理完成 - 等待 Case ID 出现或页面离开表单状态
             print("[阶段 3/3] 等待提交处理完成...")
@@ -4634,6 +4767,7 @@ def submit_5461_from_add_product(
             elapsed = 0
             
             while elapsed < max_wait:
+                _guard_auth("post_submit_wait")
                 case_id = extract_case_id(page)
                 if case_id:
                     print(f"[✓] 提取到 Case ID: {case_id}")
@@ -4655,7 +4789,7 @@ def submit_5461_from_add_product(
                 # 刷新页面文本（不刷新页面，只是重新获取）
                 try:
                     page_text = page.inner_text('body')
-                except:
+                except Exception:
                     pass
             
             if not case_id:
@@ -4668,115 +4802,22 @@ def submit_5461_from_add_product(
                 except Exception as e:
                     print(f"[警告] 截图失败: {e}")
 
-                # --- 429 提交重试机制 ---
-                # 如果 console_logs 含 429 且尚未重试，则关闭表单、等待、重新提交
-                if not _submit_429_retried:
-                    _has_429 = any('429' in _l or 'Too Many Requests' in _l for _l in console_logs)
-                    if _has_429:
-                        _submit_429_retried = True
-                        _retry_wait = random.randint(30, 90)
-                        print(f"[阶段 3/3] 检测到 429 限流，关闭表单、等待 {_retry_wait}s 后重新提交...")
-                        # 关闭 5461 表单 panel
-                        try:
-                            page.evaluate("""
-                                () => {
-                                    // 方式1: 查找 Close 文字按钟
-                                    const allBtns = document.querySelectorAll("button, kat-button, [role='button']");
-                                    for (const btn of allBtns) {
-                                        const t = (btn.textContent || btn.getAttribute('label') || '').trim().toLowerCase();
-                                        if (t === 'close' || t === '\u00d7' || t === 'x') { btn.click(); return {closed:'btn'}; }
-                                    }
-                                    // 方式2: aria-label / part 属性
-                                    const cb = document.querySelector('button[aria-label="close"], button[part="panel-close-button"]');
-                                    if (cb) { cb.click(); return {closed:'aria'}; }
-                                    // 方式3: ESC
-                                    document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', keyCode:27}));
-                                    // 方式4: 强制隐藏 panel
-                                    const p = document.querySelector("kat-panel-wrapper[panel-visible='true']");
-                                    if (p) p.setAttribute('panel-visible', 'false');
-                                    return {closed:'force'};
-                                }
-                            """)
-                            print("[阶段 3/3] 已关闭 5461 表单 panel")
-                        except Exception as _e:
-                            print(f"[警告] 关闭表单失败: {_e}")
-                        time.sleep(_retry_wait)
-                        # 重新点击 Apply to sell
-                        print("[阶段 3/3] 重新点击 Apply to sell...")
-                        _retry_open = filler.click_apply_to_sell()
-                        if _retry_open:
-                            if not wait_for_5461_form_fields(page, timeout_sec=24, interval_sec=2):
-                                print("[阶段 3/3] 429重试后 panel 仍半加载，执行 close-panel 多轮恢复...")
-                                _recovered_after_submit_429 = recover_half_loaded_5461_panel(
-                                    page, filler, brand_name, max_attempts=3,
-                                    reason="submit 后 429 重试重开 panel 半加载"
-                                )
-                                # ★ recover 可能因检测到 Under Review Case ID 而返回 True
-                                _ur_id_429 = getattr(filler, 'under_review_case_id', None) if filler else None
-                                if _ur_id_429:
-                                    print(f"[阶段 3/3] ✅ 429重试 recover 检测到 Under Review Case ID: {_ur_id_429}，跳过重填，直接记录成功")
-                                    result["case_id"] = _ur_id_429
-                                    result["submit_result"] = "success"
-                                    result["note"] = f"Under Review Case ID detected in panel during 429-retry recover: {_ur_id_429}"
-                                    return result
-                                if not _recovered_after_submit_429:
-                                    print("[阶段 3/3] 429重试恢复失败，停止本品牌，避免提交空表单")
-                                    result["submit_result"] = "failed"
-                                    result["note"] = "提交后 429；重开 panel 半加载，close-panel 多轮重试后字段仍未加载"
-                                    result["steps"].append({"phase": 3, "action": "submit_429_recovery", "status": "half_loaded_failed"})
-                                    return result
-                            # 重新填写 5461 表单
-                            print("[阶段 3/3] 重新填写 5461 表单...")
-                            fill_5461_form(page, brand_name, statement_text, upload_files, account_email)
-                            # 重新提交
-                            print("[阶段 3/3] 重新提交...")
-                            try:
-                                page.evaluate("""
-                                    () => {
-                                        const btn = document.querySelector('kat-button#submit_button');
-                                        if (btn) { btn.click(); return true; }
-                                        const btns = document.querySelectorAll('kat-button');
-                                        for (const b of btns) {
-                                            if ((b.getAttribute('label') || '').toLowerCase().includes('submit')) {
-                                                b.click(); return true;
-                                            }
-                                        }
-                                        return false;
-                                    }
-                                """)
-                                time.sleep(12)
-                            except Exception as _e:
-                                print(f"[警告] 重新提交失败: {_e}")
-                            # 重新轮询 Case ID
-                            print("[阶段 3/3] 重新等待 Case ID（最多90秒）...")
-                            _elapsed_r = 0
-                            while _elapsed_r < 90:
-                                case_id = extract_case_id(page)
-                                if case_id:
-                                    print(f"[OK] 429重试成功，Case ID: {case_id}")
-                                    break
-                                time.sleep(3)
-                                _elapsed_r += 3
-                            if not case_id:
-                                print("[阶段 3/3] 429重试后仍未获取到 Case ID")
-                        else:
-                            print("[警告] Apply to sell 重新点击失败，放弃重试")
-                # --- 429 提交重试结束 ---
+                if any('429' in line or 'Too Many Requests' in line for line in console_logs):
+                    print("[阶段 3/3] 提交后检测到 429；已设置提交安全边界，禁止自动再次点击")
             
             # 设置结果状态 - 只有在提取到 Case ID 或明确成功时才标记为成功
             page_text = page.inner_text('body')
-            has_success_indicator = "success" in page_text.lower() or "submitted" in page_text.lower() or "thank" in page_text.lower() or "case" in page_text.lower()
             
             if case_id:
                 result["submit_result"] = "success"
                 result["case_id"] = case_id
                 result["note"] = f"5461 提交成功，Case ID: {case_id}"
-            elif has_success_indicator:
-                result["submit_result"] = "partial"
-                result["note"] = f"已提交，请人工核对结果（未提取到 Case ID）"
             else:
-                result["submit_result"] = "failed"
-                result["note"] = f"提交后未检测到成功提示，请人工检查"
+                result["submit_result"] = "waiting_reconciliation"
+                result["note"] = (
+                    "提交点击已设置安全边界但尚未获得 Case ID；"
+                    "系统不会重复提交，正在核对 Selling Applications/Case"
+                )
             
             result["steps"].append({"phase": 3, "action": "submit", "status": result["submit_result"], "case_id": case_id})
             
@@ -4787,7 +4828,60 @@ def submit_5461_from_add_product(
                 result["evidence_files"].append(str(shot_confirm))
             except Exception as e:
                 print(f"[警告] 截图失败: {e}")
-            
+
+        except AuthBlockedError as exc:
+            fenced = bool(checkpoint and checkpoint.get("submit_click_fenced_at"))
+            if exc.block_id is None:
+                evidence_path = capture_auth_evidence(
+                    page,
+                    auth_settings,
+                    account_id=account_id,
+                    phase=exc.phase,
+                )
+                block = create_auth_block(
+                    auth_settings,
+                    account_id=account_id,
+                    marketplace=marketplace,
+                    brand_name=brand_name,
+                    block_type=exc.auth_state.state,
+                    phase=exc.phase,
+                    source_type=owner_type,
+                    source_id=owner_id,
+                    submit_fenced=fenced,
+                    evidence_path=evidence_path,
+                    detail=exc.auth_state.reason,
+                    checkpoint_id=int(checkpoint["id"]) if checkpoint else None,
+                )
+                exc.block_id = int(block["id"])
+                exc.submit_fenced = fenced
+            result["submit_result"] = (
+                "waiting_reconciliation" if fenced else "waiting_login"
+            )
+            result["note"] = (
+                "Seller Central 登录失效；提交点击已设置安全边界，"
+                "恢复登录后只核对结果，不会重复提交"
+                if fenced
+                else "Seller Central 登录失效；已安全暂停，恢复登录后继续当前站点"
+            )
+            result["auth_block_id"] = exc.block_id
+            result["submit_click_fenced"] = fenced
+            result["steps"].append(
+                {
+                    "phase": exc.phase,
+                    "action": "auth_block",
+                    "status": result["submit_result"],
+                    "block_type": exc.auth_state.state,
+                }
+            )
+        except SubmissionReconciliationRequired as exc:
+            checkpoint = dict(exc.checkpoint)
+            result["submit_result"] = "waiting_reconciliation"
+            result["submission_started_at"] = checkpoint.get("submit_click_fenced_at")
+            result["submit_click_fenced"] = True
+            result["note"] = (
+                "检测到已有提交点击安全边界；禁止再次提交，正在核对 "
+                "Selling Applications/Case"
+            )
         except Exception as e:
             import traceback
             err_detail = traceback.format_exc()
@@ -4806,7 +4900,7 @@ def submit_5461_from_add_product(
                 error_shot = evidence_dir / "error.png"
                 page.screenshot(path=str(error_shot), full_page=False, timeout=10000)
                 result["evidence_files"].append(str(error_shot))
-            except:
+            except Exception:
                 pass
         
         finally:
@@ -4823,7 +4917,7 @@ def submit_5461_from_add_product(
                 page.screenshot(path=str(final_shot), full_page=False, timeout=10000)
                 result["evidence_files"].append(str(final_shot))
                 print(f"[清理] 已保存最终状态截图: {final_shot}")
-            except:
+            except Exception:
                 pass
 
             submit_status = result.get("submit_result", "failed")
@@ -4893,6 +4987,31 @@ def submit_5461_from_add_product(
                         except Exception:
                             pass
 
+            if checkpoint is not None:
+                try:
+                    checkpoint_status = str(result.get("submit_result") or "error")
+                    checkpoint_phase = "finished"
+                    if result.get("case_id"):
+                        checkpoint_status = "waiting_case"
+                        checkpoint_phase = "case_followup"
+                    elif checkpoint_status == "waiting_login":
+                        checkpoint_phase = "auth_before_submit"
+                    elif checkpoint.get("submit_click_fenced_at"):
+                        checkpoint_status = (
+                            "manual_review" if checkpoint_status == "draft" else "waiting_reconciliation"
+                        )
+                        checkpoint_phase = "reconciliation"
+                    update_checkpoint_result(
+                        checkpoint_db,
+                        int(checkpoint["id"]),
+                        status=checkpoint_status,
+                        phase=checkpoint_phase,
+                        case_id=str(result.get("case_id") or ""),
+                        detail=str(result.get("note") or ""),
+                    )
+                except Exception as checkpoint_error:
+                    result["checkpoint_error"] = type(checkpoint_error).__name__
+
             # 提交成功且提取到 Case ID 时关闭标签页节省内存
             # 没有 Case ID 时保留标签页供人工核对
             submit_status = result.get("submit_result", "failed")
@@ -4903,11 +5022,11 @@ def submit_5461_from_add_product(
                     print(f"[清理] 执行成功（Case ID: {case_id}），关闭标签页...")
                     try:
                         page.close()
-                    except:
+                    except Exception:
                         pass
                     try:
                         browser.close()
-                    except:
+                    except Exception:
                         pass
                 else:
                     print(f"[清理] 批量模式：执行成功（Case ID: {case_id}），保持浏览器开启")
@@ -4962,7 +5081,7 @@ def submit_5461_from_add_product(
                 for old_page in closable_pages[:-1]:
                     try:
                         old_page.close()
-                    except:
+                    except Exception:
                         pass
             else:
                 page = context.new_page()
@@ -4976,11 +5095,11 @@ def submit_5461_from_add_product(
             if not keep_browser_open:
                 try:
                     page.close()
-                except:
+                except Exception:
                     pass
                 try:
                     browser.close()
-                except:
+                except Exception:
                     pass
     else:
         print("[复用] 使用已有页面实例，跳过浏览器连接和账号切换")

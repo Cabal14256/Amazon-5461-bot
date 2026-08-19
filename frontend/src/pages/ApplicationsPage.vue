@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { NDataTable, NDatePicker, NEmpty, NSelect, NTag } from 'naive-ui'
 import type { DataTableColumns, PaginationProps } from 'naive-ui'
 import { getApplications } from '@/api'
@@ -12,6 +12,7 @@ import { dashboardStatusLabel } from '@/utils/statusLabels'
 
 const records = ref<ApplicationRecord[]>([])
 const loading = ref(true)
+let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 const accountFilter = ref<string | null>(null)
 const siteFilter = ref<Site['code'] | null>(null)
@@ -19,9 +20,18 @@ const brandFilter = ref<string | null>(null)
 const statusFilter = ref<BusinessStatus | null>(null)
 const dateRange = ref<[number, number] | null>(null)
 
-onMounted(async () => {
+async function loadRecords(showLoading = false) {
+  if (showLoading) loading.value = true
   records.value = await getApplications()
   loading.value = false
+}
+
+onMounted(() => {
+  void loadRecords(true)
+  refreshTimer = setInterval(() => void loadRecords(false), 15_000)
+})
+onUnmounted(() => {
+  if (refreshTimer) clearInterval(refreshTimer)
 })
 
 const accountOptions = computed(() =>
@@ -50,6 +60,10 @@ const statusOptions = [
   { label: '部分完成', value: 'partial' },
   { label: '失败', value: 'failed' },
   { label: '异常', value: 'error' },
+  { label: '等待重新登录', value: 'waiting_login' },
+  { label: '提交结果确认中', value: 'waiting_reconciliation' },
+  { label: '等待人工确认', value: 'manual_review' },
+  { label: '已恢复自动处理', value: 'resolved' },
 ]
 
 const filtered = computed(() =>
@@ -130,16 +144,20 @@ const columns: DataTableColumns<ApplicationRecord> = [
     render: (row) => h(StatusTag, { kind: 'business', status: row.localStatus, size: 'small' }),
   },
   {
-    title: '控制面板',
+    title: '控制面板 / 自动流程',
     key: 'dashboardStatus',
     width: 132,
     sorter: (a, b) => dashboardStatusLabel(a.dashboardStatus).localeCompare(dashboardStatusLabel(b.dashboardStatus), 'zh-CN'),
-    render: (row) =>
-      h(
+    render: (row) => {
+      if (row.automation && ['waiting_login', 'waiting_reconciliation', 'manual_review', 'resolved'].includes(row.automation.status)) {
+        return h(StatusTag, { kind: 'business', status: row.automation.status, size: 'small' })
+      }
+      return h(
         NTag,
         { size: 'small', bordered: false, type: dashboardTagType(row.dashboardStatus) },
         { default: () => dashboardStatusLabel(row.dashboardStatus) },
-      ),
+      )
+    },
   },
   {
     title: 'Case 回复',

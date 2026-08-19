@@ -7,23 +7,27 @@ import {
   NCard,
   NCheckbox,
   NCheckboxGroup,
+  NCollapse,
+  NCollapseItem,
   NEmpty,
   NIcon,
   NInput,
+  NInputNumber,
   NSelect,
   NSpin,
   NStep,
   NSteps,
+  NSwitch,
   NTag,
   useDialog,
   useMessage,
 } from 'naive-ui'
 import { FlaskOutline, RefreshOutline, SearchOutline, WarningOutline } from '@vicons/ionicons5'
-import { createJob, createSubmit, getAccounts, getBrands, getSites, runPrecheck, syncAccounts } from '@/api'
+import { createJob, createSubmit, getAccounts, getBrands, getEffectiveSettings, getSites, runPrecheck, syncAccounts } from '@/api'
 import { USE_MOCK } from '@/api/client'
 import { ApiError } from '@/api/http'
 import type { SubmitPreflightCheck } from '@/api/real'
-import type { Account, Brand, JobMode, JobType, PrecheckItem, Site } from '@/types'
+import type { Account, Brand, JobMode, JobOptions, JobType, PrecheckItem, Site } from '@/types'
 import SubmitPreflightList from '@/components/SubmitPreflightList.vue'
 
 const router = useRouter()
@@ -55,11 +59,30 @@ const riskAccepted = ref(false)
 /** submit 被 422 preflight_blocked 阻断时后端返回的检查表 */
 const blockedChecks = ref<SubmitPreflightCheck[] | null>(null)
 
+const jobLimits = ref({ diagnose: 20, dry_run: 20, submit: 20 })
+const globalCaseFollowupDelayHours = ref(2)
+const globalCaseFollowupEnabled = ref(true)
+const delayOverrideEnabled = ref(false)
+const caseFollowupDelayHours = ref(2)
+const followupSwitchOverrideEnabled = ref(false)
+const caseFollowupEnabled = ref(true)
+
 onMounted(async () => {
-  const [a, s, b] = await Promise.all([getAccounts(), getSites(), getBrands()])
+  const settingsPromise = getEffectiveSettings().catch(() => {
+    message.warning('暂时无法读取运行参数，品牌数量仍会由服务端最终校验')
+    return null
+  })
+  const [a, s, b, effective] = await Promise.all([getAccounts(), getSites(), getBrands(), settingsPromise])
   accounts.value = a
   sites.value = s
   brands.value = b
+  if (effective) {
+    jobLimits.value = effective.limits
+    globalCaseFollowupDelayHours.value = effective.job_defaults.case_followup_delay_hours
+    globalCaseFollowupEnabled.value = effective.job_defaults.case_followup_enabled
+    caseFollowupDelayHours.value = effective.job_defaults.case_followup_delay_hours
+    caseFollowupEnabled.value = effective.job_defaults.case_followup_enabled
+  }
   catalogLoading.value = false
 })
 
@@ -99,7 +122,15 @@ const typeOptions = [
 ]
 
 const accountOptions = computed(() =>
-  accounts.value.map((a) => ({ label: `${a.label}（${a.alias}）`, value: a.id })),
+  accounts.value.map((a) => {
+    const active = (a.status ?? '').trim().toLowerCase() === 'active'
+    const suffix = active ? '' : ` — 未就绪（${a.status || '状态缺失'}）`
+    return {
+      label: `${a.label}（${a.alias}）${suffix}`,
+      value: a.id,
+      disabled: !active,
+    }
+  }),
 )
 
 const siteOptions = computed(() => sites.value.map((s) => ({ label: `${s.name}（${s.code}）`, value: s.code })))
@@ -114,9 +145,9 @@ const accountLabel = computed(
   () => accounts.value.find((a) => a.id === accountId.value)?.label ?? '—',
 )
 
-/** 单次任务品牌数上限（与后端 MAX_BRANDS_PER_JOB=20 对齐） */
-const MAX_BRANDS = 20
-const brandCapReached = computed(() => selectedBrands.value.length >= MAX_BRANDS)
+const maxBrands = computed(() => mode.value === 'submit' ? jobLimits.value.submit : jobLimits.value[mode.value === 'diagnose' ? 'diagnose' : 'dry_run'])
+const brandCapReached = computed(() => selectedBrands.value.length >= maxBrands.value)
+const brandCapExceeded = computed(() => selectedBrands.value.length > maxBrands.value)
 
 const precheckHasFailure = computed(() => precheckItems.value.some((i) => i.status === 'failed'))
 
@@ -132,7 +163,7 @@ function canGoNext(): boolean {
     case 3:
       return !!site.value
     case 4:
-      return selectedBrands.value.length > 0
+      return selectedBrands.value.length > 0 && !brandCapExceeded.value
     case 5:
       return precheckDone.value && !precheckRunning.value
     default:
@@ -166,8 +197,11 @@ async function onSyncAccounts() {
   try {
     const r = await syncAccounts()
     accounts.value = await getAccounts()
-    if (r.enrolled.length > 0) {
-      message.success(`已新登记 ${r.enrolled.length} 个账号：${r.enrolled.map((e) => e.account_id).join('、')}（当前共 ${r.total} 个）`)
+    if (r.enrolled.length > 0 || r.refreshed.length > 0) {
+      const parts = []
+      if (r.enrolled.length > 0) parts.push(`新登记 ${r.enrolled.length} 个`)
+      if (r.refreshed.length > 0) parts.push(`已补齐 ${r.refreshed.length} 个待配置账号`)
+      message.success(`${parts.join('、')}（当前共 ${r.total} 个）`)
     } else {
       message.info(`账号已是最新：扫描 ${r.profiles_scanned} 个 AdsPower 环境，共 ${r.total} 个账号`)
     }
@@ -184,14 +218,19 @@ async function onSyncAccounts() {
 /** 真实模式：后端无独立预检接口，基于已加载的真实 catalog 做本地前置条件展示 */
 function localPrecheck(): PrecheckItem[] {
   const acc = accounts.value.find((a) => a.id === accountId.value)
+  const accountActive = (acc?.status ?? '').trim().toLowerCase() === 'active'
   const siteKnown = sites.value.some((s) => s.code === site.value)
   const allPacksReady = selectedBrands.value.every((b) => brands.value.some((x) => x.name === b && x.packReady))
   return [
     {
       key: 'account',
-      label: '账号在真实目录中',
-      status: acc ? 'passed' : 'failed',
-      detail: acc ? '会话由 AdsPower profile 承载；调度时会检查同 profile 锁' : '所选账号不在 catalog，后端将拒绝创建',
+      label: '账号已启用',
+      status: accountActive ? 'passed' : 'failed',
+      detail: accountActive
+        ? '账号状态为 active，会话由 AdsPower profile 承载'
+        : acc
+          ? `账号状态为 ${acc.status || '缺失'}，请先点击「从 AdsPower 同步账号」补齐 profile`
+          : '所选账号不在 catalog，后端将拒绝创建',
     },
     {
       key: 'site',
@@ -234,12 +273,20 @@ async function doPrecheck() {
 }
 
 function wizardPayload() {
+  const options: JobOptions = {}
+  if (mode.value === 'submit' && delayOverrideEnabled.value) {
+    options.case_followup_delay_hours = caseFollowupDelayHours.value
+  }
+  if (mode.value === 'submit' && followupSwitchOverrideEnabled.value) {
+    options.case_followup_enabled = caseFollowupEnabled.value
+  }
   return {
     mode: mode.value,
     type: jobType.value,
     accountId: accountId.value ?? '',
     site: site.value ?? '',
     brands: selectedBrands.value,
+    ...(Object.keys(options).length > 0 ? { options } : {}),
   }
 }
 
@@ -310,6 +357,9 @@ function submitErrorMessage(e: unknown): string {
       if (e.detail === 'too_many_brands') return '提交失败：品牌数超过真实提交单次上限，请分批创建'
       if (e.detail === 'no_brands') return '提交失败：未选择品牌'
       if (e.detail === 'unknown_account') return '提交失败：账号不在白名单中'
+      if (e.detail === 'account_not_enabled') {
+        return '提交失败：账号尚未就绪（缺少 AdsPower profile 或状态非 active），请先同步账号'
+      }
       if (e.detail === 'unknown_site') return '提交失败：站点不在白名单中'
       if (e.detail.startsWith('unknown_brand')) {
         return `提交失败：品牌不在白名单中（${e.detail.split(':')[1] ?? '未知'}）`
@@ -412,9 +462,9 @@ const precheckStatusType = { passed: 'success', warning: 'warning', failed: 'err
 
         <!-- 4. 品牌 -->
         <div v-else-if="currentStep === 4" class="step-body">
-          <div class="field-label">选择品牌（可多选，已选 {{ selectedBrands.length }} / {{ MAX_BRANDS }} 个）</div>
+          <div class="field-label">选择品牌（可多选，已选 {{ selectedBrands.length }} / {{ maxBrands }} 个）</div>
           <n-alert v-if="brandCapReached" type="warning" :bordered="false" style="margin-bottom: 12px; max-width: 560px">
-            已达单次任务品牌数上限 {{ MAX_BRANDS }} 个，如需更多品牌请分多个任务创建。
+            {{ brandCapExceeded ? `当前模式最多 ${maxBrands} 个品牌，请取消多选的品牌后继续。` : `已达单次任务品牌数上限 ${maxBrands} 个，如需更多品牌请分多个任务创建。` }}
           </n-alert>
           <n-input v-model:value="brandSearch" placeholder="搜索品牌名…" clearable style="max-width: 420px; margin-bottom: 12px" />
           <n-checkbox-group v-model:value="selectedBrands">
@@ -479,6 +529,37 @@ const precheckStatusType = { passed: 'success', warning: 'warning', failed: 'err
           </n-card>
 
           <template v-if="mode === 'submit'">
+            <n-collapse style="margin-top: 16px; max-width: 640px">
+              <n-collapse-item title="高级参数（可选）" name="advanced-options">
+                <n-alert type="info" :bordered="false" style="margin-bottom: 14px">
+                  默认沿用系统设置。只有勾选覆盖后，参数才会随本任务保存且创建后不可修改。
+                </n-alert>
+                <div class="advanced-option-row">
+                  <n-checkbox v-model:checked="delayOverrideEnabled">覆盖首次 Case 跟进延迟</n-checkbox>
+                  <div class="advanced-control">
+                    <n-input-number
+                      v-model:value="caseFollowupDelayHours"
+                      :disabled="!delayOverrideEnabled"
+                      :min="0.1"
+                      :max="168"
+                      :step="0.5"
+                    />
+                    <span>小时</span>
+                    <n-tag v-if="delayOverrideEnabled" size="small" type="warning">任务级覆盖</n-tag>
+                    <span v-else class="global-default">全局 {{ globalCaseFollowupDelayHours }} 小时</span>
+                  </div>
+                </div>
+                <div class="advanced-option-row">
+                  <n-checkbox v-model:checked="followupSwitchOverrideEnabled">覆盖是否创建 Case 跟进</n-checkbox>
+                  <div class="advanced-control">
+                    <n-switch v-model:value="caseFollowupEnabled" :disabled="!followupSwitchOverrideEnabled" />
+                    <span>{{ caseFollowupEnabled ? '创建' : '不创建' }}</span>
+                    <n-tag v-if="followupSwitchOverrideEnabled" size="small" type="warning">任务级覆盖</n-tag>
+                    <span v-else class="global-default">全局{{ globalCaseFollowupEnabled ? '创建' : '不创建' }}</span>
+                  </div>
+                </div>
+              </n-collapse-item>
+            </n-collapse>
             <n-alert type="error" :bordered="false" style="margin-top: 16px; max-width: 640px">
               <template #icon><n-icon :component="WarningOutline" /></template>
               点击「确认真实提交」将直接创建真实提交任务并立即入队：自动化会真实登录 Seller Central
@@ -512,7 +593,7 @@ const precheckStatusType = { passed: 'success', warning: 'warning', failed: 'err
           v-else
           :type="mode === 'submit' ? 'error' : 'primary'"
           :loading="submitting"
-          :disabled="mode === 'submit' && !riskAccepted"
+          :disabled="brandCapExceeded || (mode === 'submit' && !riskAccepted)"
           @click="submit"
         >
           {{ mode === 'submit' ? '确认真实提交' : '创建任务' }}
@@ -659,6 +740,40 @@ const precheckStatusType = { passed: 'success', warning: 'warning', failed: 'err
 .summary-row > b {
   text-align: right;
   word-break: break-all;
+}
+
+.advanced-option-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr);
+  gap: 16px;
+  align-items: center;
+  padding: 11px 0;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.16);
+}
+
+.advanced-option-row:last-child {
+  border-bottom: 0;
+}
+
+.advanced-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.advanced-control :deep(.n-input-number) {
+  width: 140px;
+}
+
+.global-default {
+  opacity: 0.6;
+  font-size: 12px;
+}
+
+@media (max-width: 680px) {
+  .advanced-option-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .wizard-footer {

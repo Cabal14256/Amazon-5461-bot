@@ -13,6 +13,10 @@ const RESULT_LABELS: Record<string, string> = {
   error: '异常',
   unknown: '未知',
   not_found: '未找到',
+  waiting_login: '等待重新登录',
+  waiting_reconciliation: '提交结果确认中',
+  manual_review: '等待人工确认',
+  resolved: '已恢复自动处理',
 }
 
 const DASHBOARD_LABELS: Record<string, string> = {

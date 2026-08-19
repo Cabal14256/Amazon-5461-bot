@@ -27,6 +27,7 @@ import signal
 from collections.abc import Callable
 from typing import Any
 
+from src.auth_recovery import account_has_open_auth_block
 from src.db import (
     account_has_active_case_followup,
     claim_next_queued_automation_job,
@@ -54,6 +55,48 @@ from src.web.config import WebSettings
 logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled_before_start", "terminated_unknown_state"}
+WAITING_HUMAN_ERROR_CLASSES = (
+    "waiting_reconciliation",
+    "waiting_login",
+    "manual_review",
+)
+
+
+def _waiting_human_error_class(job: dict[str, Any], state: Any) -> str:
+    """Return the exact pause reason persisted by the batch item.
+
+    ``waiting_human`` is a run-state umbrella, not proof that Seller Central
+    logged out.  Prefer the fenced reconciliation state over login and manual
+    review, then preserve a known job-level value.  Unknown pauses remain
+    generic instead of being mislabeled as a login failure.
+    """
+
+    found: set[str] = set()
+    if isinstance(state, dict):
+        for batch in state.get("batches") or []:
+            for item in (batch or {}).get("items") or []:
+                result = item.get("result") if isinstance(item.get("result"), dict) else {}
+                if (
+                    str((item or {}).get("status") or "") != "waiting_human"
+                    and str(result.get("status") or "") != "manual_review"
+                ):
+                    continue
+                for value in (
+                    result.get("status"),
+                    result.get("error"),
+                    result.get("note"),
+                    item.get("error"),
+                ):
+                    normalized = str(value or "").strip().lower()
+                    if normalized in WAITING_HUMAN_ERROR_CLASSES:
+                        found.add(normalized)
+    for candidate in WAITING_HUMAN_ERROR_CLASSES:
+        if candidate in found:
+            return candidate
+    existing = str(job.get("error_class") or "").strip().lower()
+    if existing in WAITING_HUMAN_ERROR_CLASSES:
+        return existing
+    return existing or "waiting_human"
 
 
 class JobManager:
@@ -152,7 +195,22 @@ class JobManager:
 
         job = get_automation_job(self.db_path, job_id) or {}
         cancelled = bool(job.get("stop_requested_at"))
-        if exit_code == 0 and not cancelled:
+        state = read_json_tolerant(active["paths"].batch_state, retries=1)
+        waiting_human = bool(
+            job.get("run_status") == "waiting_human"
+            or any(
+                str((batch or {}).get("status") or "") == "waiting_human"
+                or str(item.get("status") or "") == "waiting_human"
+                for batch in (state.get("batches") or [])
+                for item in ((batch or {}).get("items") or [])
+            )
+            if isinstance(state, dict)
+            else job.get("run_status") == "waiting_human"
+        )
+        if waiting_human:
+            run_status = "waiting_human"
+            error_class = _waiting_human_error_class(job, state)
+        elif exit_code == 0 and not cancelled:
             run_status, error_class = "completed", None
         elif cancelled:
             # The worker saw STOP_REQUESTED and wound down cleanly; the plan
@@ -166,7 +224,7 @@ class JobManager:
             run_status=run_status,
             exit_code=int(exit_code),
             error_class=error_class,
-            finished_at=_now(),
+            finished_at=None if waiting_human else _now(),
         )
         self._sync_items(job_id, active["paths"])
         profile_locks.release(self.db_path, active["profile_key"], job_id)
@@ -189,6 +247,10 @@ class JobManager:
         job_id = job["id"]
 
         if account_has_active_case_followup(self.db_path, job["account_id"]):
+            release_automation_job_claim(self.db_path, job_id)
+            return
+
+        if account_has_open_auth_block(self.db_path, str(job["account_id"])):
             release_automation_job_claim(self.db_path, job_id)
             return
 
@@ -215,7 +277,11 @@ class JobManager:
         )
         try:
             cmd = build_job_command(job, paths)
-            env = build_job_env(paths, self.settings.accounts_path)
+            env = build_job_env(
+                paths,
+                self.settings.accounts_path,
+                db_path=self.settings.db_path,
+            )
             proc = self.process_factory(
                 cmd,
                 stdout_path=paths.stdout_log,

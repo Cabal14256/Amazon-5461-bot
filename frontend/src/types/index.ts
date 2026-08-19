@@ -28,6 +28,12 @@ export type BusinessStatus =
   | 'partial'
   | 'failed'
   | 'error'
+  | 'waiting_case_id'
+  | 'waiting_case'
+  | 'waiting_login'
+  | 'waiting_reconciliation'
+  | 'manual_review'
+  | 'resolved'
 
 /** Codex 修复 incident 状态机（13 态） */
 export type IncidentStatus =
@@ -57,6 +63,8 @@ export interface Account {
   label: string
   alias: string
   marketplaceIds: string[]
+  /** 后端账号就绪状态；只有 active 可创建任务 */
+  status: string | null
 }
 
 export interface Site {
@@ -82,6 +90,10 @@ export interface BrandJobResult {
   dashboardStatus: string | null
   durationSec: number | null
   note: string | null
+  /** 后续 Case/控制面板核对得到的权威业务态来源。 */
+  businessSource?: string | null
+  businessCheckedAt?: string | null
+  businessDetail?: string | null
 }
 
 export interface JobSummary {
@@ -136,10 +148,51 @@ export interface ApplicationRecord {
   caseId: string | null
   /** 状态来源优先级说明 */
   statusSource: string
-  /** read model 返回的原始 source 值（case_reply / dashboard_today / submission_case_id / batch_state / none），仅真实模式有 */
+  /** read model 返回的原始 source 值（含 case_reply / case_id_recovery / dashboard_reconciliation 等），仅真实模式有 */
   statusSourceRaw?: string | null
+  /** 状态来源的补充说明；与来源标签分开，避免重复显示标签。 */
+  statusSourceDetail?: string | null
   updatedAt: string
   evidence: EvidenceItem[]
+  automation?: ApplicationAutomation | null
+}
+
+export interface AutomationTimelineItem {
+  route_index: number
+  site: string
+  status: string
+  scheduled_at: string | null
+  started_at: string | null
+  submitted_at: string | null
+  completed_at: string | null
+  case_id: string | null
+  final_result: string | null
+  decision_reason: string | null
+  error: string | null
+}
+
+export interface ApplicationAutomation {
+  checkpoint_id: number
+  owner_type: string
+  owner_id: string
+  status: string
+  phase: string
+  current_site: string
+  submit_intent_at: string | null
+  submit_click_fenced_at: string | null
+  resumed_at: string | null
+  submit_fenced: boolean
+  auth_block_id: number | null
+  block_type: string | null
+  detected_at: string | null
+  last_checked_at: string | null
+  next_check_at: string | null
+  evidence_path: string | null
+  next_action: string
+  campaign_id: number | null
+  timeline: AutomationTimelineItem[]
+  updated_at: string | null
+  detail: string | null
 }
 
 export type PendingCategory =
@@ -514,6 +567,12 @@ export interface NewJobPayload {
   accountId: string
   site: Site['code']
   brands: string[]
+  options?: JobOptions
+}
+
+export interface JobOptions {
+  case_followup_delay_hours?: number
+  case_followup_enabled?: boolean
 }
 
 /* ---------- 后端契约镜像（对齐 src/web/schemas.py，保持 snake_case） ---------- */
@@ -524,6 +583,43 @@ export interface WebUser {
   role: string
   display_name: string | null
   last_login_at?: string | null
+}
+
+export type SettingApplyMode = 'immediate' | 'new_job' | 'restart_required'
+export type SettingStatus = 'active' | 'protected' | 'unwired'
+export type SettingValueType = 'integer' | 'number' | 'boolean'
+
+export interface SettingField {
+  key: string
+  group: string
+  label: string
+  value_type: SettingValueType
+  value: number | boolean
+  default: number | boolean
+  unit: string
+  minimum: number | null
+  maximum: number | null
+  step: number | null
+  editable: boolean
+  apply_mode: SettingApplyMode
+  status: SettingStatus
+  description: string
+}
+
+export interface EffectiveSettings {
+  revision: string
+  fields: SettingField[]
+  limits: Record<'diagnose' | 'dry_run' | 'submit', number>
+  job_defaults: {
+    case_followup_delay_hours: number
+    case_followup_enabled: boolean
+  }
+}
+
+export interface SettingsPatchResult {
+  snapshot: EffectiveSettings
+  changed: Record<string, { old: number; new: number }>
+  restart_required: string[]
 }
 
 export interface BackendHealthCheck {
@@ -574,6 +670,46 @@ export interface BackendApplication {
   case_id: string | null
   submit_result: string | null
   authoritative: StatusResolution
+  automation: ApplicationAutomation | null
+}
+
+export type AuthBlockType =
+  | 'login_required'
+  | 'captcha_required'
+  | 'two_factor_required'
+  | 'account_risk'
+  | 'unknown_auth_state'
+
+export interface AuthBlock {
+  id: number
+  account_id: string
+  marketplace: string | null
+  brand_name: string | null
+  profile_hint: string
+  block_type: AuthBlockType | string
+  phase: string
+  source_type: string
+  source_id: string | null
+  status: 'open' | 'resolved'
+  submit_fenced: boolean
+  evidence_path: string | null
+  detail: string | null
+  detected_at: string
+  last_checked_at: string | null
+  next_check_at: string | null
+  resolved_at: string | null
+  created_at: string
+  updated_at: string
+  can_open_profile: boolean
+  can_verify_and_resume: boolean
+}
+
+export interface AuthBlockAction {
+  status: string
+  block_id: number | null
+  block_type: string | null
+  reason: string | null
+  actions: string[]
 }
 
 /** 后端 AutomationJobOut 镜像（automation_jobs 表主源，snake_case） */
@@ -586,11 +722,13 @@ export interface AutomationJob {
   account_id: string
   marketplace: string | null
   brands: string[]
+  options?: JobOptions
   pid: number | null
   exit_code: number | null
   error_class: string | null
   /** 后端读取时注解：queued 任务的排队原因（waiting_case_followup / waiting_profile_lock / waiting_serial_queue） */
   queue_reason: string | null
+  auth_block_id?: number | null
   stop_requested_at: string | null
   started_at: string | null
   finished_at: string | null
@@ -612,6 +750,7 @@ export interface AutomationJobItem {
   started_at: string | null
   finished_at: string | null
   note: string | null
+  authoritative: StatusResolution | null
 }
 
 /**
@@ -648,6 +787,7 @@ export interface CaseFollowUp {
   decision_reason: string | null
   evidence_path: string | null
   error: string | null
+  auth_block_id?: number | null
 }
 
 export interface CaseIdRecovery {
@@ -667,6 +807,7 @@ export interface CaseIdRecovery {
   decision_reason: string | null
   evidence_path: string | null
   error: string | null
+  auth_block_id?: number | null
 }
 
 export interface ReapplicationAttempt {
@@ -683,6 +824,7 @@ export interface ReapplicationAttempt {
   final_result: string | null
   decision_reason: string | null
   error: string | null
+  auth_block_id?: number | null
 }
 
 export interface ReapplicationCampaign {
@@ -693,6 +835,7 @@ export interface ReapplicationCampaign {
   route: string[]
   current_route_index: number
   status: string
+  authorization_source: string
   source_case_followup_id: number | null
   source_marketplace: string | null
   stop_reason: string | null
@@ -700,6 +843,15 @@ export interface ReapplicationCampaign {
   updated_at: string | null
   completed_at: string | null
   attempts: ReapplicationAttempt[]
+}
+
+export interface ReapplicationAutomationStatus {
+  enabled: boolean
+  auto_authorize_declined_cases: boolean
+  auto_backfill_declined_cases: boolean
+  auto_backfill_min_followup_id: number
+  decline_delay_hours: number
+  routes: Record<string, string[]>
 }
 
 export interface EligibleDeclinedCase {

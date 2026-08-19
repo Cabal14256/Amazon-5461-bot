@@ -6,6 +6,7 @@ import src.approved_case_verification as approved_verification
 from src.approved_case_verification import (
     _connect_approval_message_matches,
     _connect_brand_config_for_brand,
+    _connect_failure_marker,
     _manage_brands_direct_url,
     choose_connect_brand_candidate,
     combine_approved_verification,
@@ -100,6 +101,20 @@ def test_missing_manage_brand_with_add_product_failure_still_needs_connect_probe
 def test_connect_brand_technical_unknown_is_retryable_even_if_add_product_fails():
     result = combine_approved_verification(_check("connect_unknown"), _check("fail"))
     assert result["result"] == "verification_pending"
+
+
+@pytest.mark.parametrize("manage_result", ["not_found", "connect_unknown"])
+def test_explicit_add_product_restriction_overrides_stale_portfolio(manage_result):
+    result = combine_approved_verification(
+        _check(manage_result),
+        {
+            "result": "fail",
+            "reason": "1 application required",
+            "restriction_marker": "application required",
+        },
+    )
+    assert result["result"] == "false_approved"
+    assert result["is_success"] is False
 
 
 def test_login_or_captcha_block_stays_blocked_without_business_failure():
@@ -259,3 +274,17 @@ def test_connect_approval_message_must_name_the_expected_brand():
     )
     assert _connect_approval_message_matches(text, "DEMO_VISTA")
     assert not _connect_approval_message_matches(text, "DEMO_WILL")
+
+
+def test_connect_failure_recognizes_brand_specific_listing_approval_panel():
+    text = (
+        "Apply to sell\n"
+        "Listing approval for DEMO_WILL\n"
+        "Submit required information\n"
+        "This is a seller approval application for DEMO_WILL."
+    )
+    assert (
+        _connect_failure_marker(text, "DEMO_WILL")
+        == "listing approval application required"
+    )
+    assert _connect_failure_marker(text, "OTHER_BRAND") == ""

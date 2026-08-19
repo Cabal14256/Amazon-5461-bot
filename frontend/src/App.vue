@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import {
   AddCircleOutline,
@@ -12,12 +12,14 @@ import {
   MoonOutline,
   PersonCircleOutline,
   RepeatOutline,
+  SettingsOutline,
   SunnyOutline,
   TimeOutline,
 } from '@vicons/ionicons5'
 import type { MenuOption } from 'naive-ui'
 import {
   NButton,
+  NBadge,
   NConfigProvider,
   NDialogProvider,
   NIcon,
@@ -35,6 +37,7 @@ import { themeOverrides } from '@/theme'
 import { useThemeStore } from '@/stores/theme'
 import { useAuthStore } from '@/stores/auth'
 import { USE_MOCK } from '@/api/client'
+import { getAuthBlocks } from '@/api'
 
 const themeStore = useThemeStore()
 const auth = useAuthStore()
@@ -47,7 +50,7 @@ function icon(comp: Parameters<typeof h>[0]) {
   return () => h(NIcon, null, { default: () => h(comp) })
 }
 
-const menuOptions: MenuOption[] = [
+const menuOptions = computed<MenuOption[]>(() => [
   { label: '系统总览', key: '/', icon: icon(GridOutline) },
   { label: '任务列表', key: '/jobs', icon: icon(ListOutline) },
   { label: '新建任务', key: '/jobs/new', icon: icon(AddCircleOutline) },
@@ -56,7 +59,8 @@ const menuOptions: MenuOption[] = [
   { label: 'Case 跟进', key: '/case-followups', icon: icon(ChatbubblesOutline) },
   { label: '待人工处理', key: '/pending', icon: icon(TimeOutline) },
   { label: '修复中心', key: '/repair', icon: icon(ConstructOutline) },
-]
+  ...(auth.isAdmin ? [{ label: '系统设置', key: '/settings', icon: icon(SettingsOutline) }] : []),
+])
 
 const activeKey = computed(() => {
   if (route.path.startsWith('/jobs/new')) return '/jobs/new'
@@ -77,6 +81,29 @@ const ROLE_LABEL: Record<string, string> = {
 
 const userLabel = computed(() => auth.user?.display_name || auth.user?.username || '')
 const roleLabel = computed(() => ROLE_LABEL[auth.user?.role ?? ''] ?? auth.user?.role ?? '')
+const authBlockCount = ref(0)
+let authPoll: ReturnType<typeof setInterval> | null = null
+
+async function loadAuthBlockCount() {
+  if (USE_MOCK || !auth.user || isLoginPage.value) {
+    authBlockCount.value = 0
+    return
+  }
+  try {
+    authBlockCount.value = (await getAuthBlocks()).length
+  } catch {
+    // Keep the navigation usable; PendingPage shows its own loading/error state.
+  }
+}
+
+watch(() => auth.user?.id, () => void loadAuthBlockCount())
+onMounted(() => {
+  void loadAuthBlockCount()
+  authPoll = setInterval(() => void loadAuthBlockCount(), 15_000)
+})
+onUnmounted(() => {
+  if (authPoll) clearInterval(authPoll)
+})
 
 async function onLogout() {
   await auth.logout()
@@ -104,6 +131,11 @@ async function onLogout() {
               @update:value="onMenu"
             />
             <div class="top-right">
+              <n-badge v-if="authBlockCount > 0" :value="authBlockCount" :max="99" type="error">
+                <n-button size="small" type="warning" secondary @click="router.push('/pending')">
+                  账号需要重新登录
+                </n-button>
+              </n-badge>
               <n-tag v-if="USE_MOCK" size="small" :bordered="false" type="info" class="env-tag">Mock 环境</n-tag>
               <n-button quaternary circle @click="themeStore.toggle()">
                 <template #icon>

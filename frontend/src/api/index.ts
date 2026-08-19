@@ -10,6 +10,7 @@ import {
   createSubmitJob,
   fetchAccounts,
   fetchApplications,
+  fetchAuthBlocks,
   fetchBrands,
   fetchCaseFollowUps,
   fetchCaseIdRecoveries,
@@ -21,17 +22,21 @@ import {
   fetchMe,
   fetchOverview,
   fetchReapplication,
+  fetchReapplicationAutomationStatus,
   fetchReapplications,
   fetchEligibleDeclinedCases,
+  fetchEffectiveSettings,
   authorizeDeclinedCaseReapplication,
   fetchRepairJobDetail,
   fetchRepairJobDiff,
   fetchRepairJobs,
   fetchSites,
+  openAuthBlockProfile,
   forceTerminateJob,
   login as realLogin,
   logout as realLogout,
   parseLogLine,
+  patchEffectiveSettings,
   postGeneratePatch,
   postTriage,
   requestJobStop,
@@ -40,6 +45,7 @@ import {
   startPostReleaseCheck,
   subscribeJobEvents,
   syncAccounts as realSyncAccounts,
+  verifyAndResumeAuthBlock,
   type AccountSyncResult,
   type IncidentListFilters,
   type JobCreatePayload,
@@ -52,16 +58,20 @@ import { mockOverview } from './mock/overview'
 import { mockApplications } from './mock/applications'
 import { mockCaseFollowUps, mockCaseFollowUpTasks, mockPendingItems } from './mock/cases'
 import { mockAccounts, mockBrands, mockSites } from './mock/catalog'
+import { mockEffectiveSettings, patchMockEffectiveSettings } from './mock/settings'
 import { mockApproveR2Sample, mockIncidentBundleFiles, mockIncidents, mockLatestTriage, mockPatchJobs, mockRepairIncidents } from './mock/incidents'
 import { mockJobEvidence, mockJobLogs, mockJobs } from './mock/jobs'
 import type {
   Account,
   ApplicationRecord,
+  AuthBlock,
+  AuthBlockAction,
   AutomationJob,
   Brand,
   CaseFollowUp,
   CaseIdRecovery,
   EvidenceItem,
+  EffectiveSettings,
   GeneratePatchResponse,
   Incident,
   IncidentBundleFile,
@@ -74,12 +84,14 @@ import type {
   PendingItem,
   PrecheckItem,
   ReapplicationCampaign,
+  ReapplicationAutomationStatus,
   EligibleDeclinedCase,
   ReapplicationAuthorizationResult,
   RepairIncident,
   RepairJob,
   RepairJobDetail,
   Site,
+  SettingsPatchResult,
   WebUser,
 } from '@/types'
 import type { CaseFollowUpItem } from './mock/cases'
@@ -136,6 +148,24 @@ export function getJobEvidence(id: string): Promise<EvidenceItem[]> {
 
 export function getApplications(): Promise<ApplicationRecord[]> {
   return USE_MOCK ? resolve(mockApplications) : fetchApplications()
+}
+
+export function getAuthBlocks(status: string | null = 'open'): Promise<AuthBlock[]> {
+  return USE_MOCK ? resolve([]) : fetchAuthBlocks(status)
+}
+
+export function openAuthProfile(id: number): Promise<AuthBlockAction> {
+  if (USE_MOCK) {
+    return resolve({ status: 'opened', block_id: id, block_type: null, reason: null, actions: [] })
+  }
+  return openAuthBlockProfile(id)
+}
+
+export function verifyAndResumeAuth(id: number): Promise<AuthBlockAction> {
+  if (USE_MOCK) {
+    return resolve({ status: 'resolved', block_id: id, block_type: null, reason: null, actions: [] })
+  }
+  return verifyAndResumeAuthBlock(id)
 }
 
 /** Mock 分组数据；真实模式 PendingPage 改用 Case ID 找回 / 重新申请人工审核两个真实分组 */
@@ -327,6 +357,10 @@ export function getReapplications(status?: string): Promise<ReapplicationCampaig
   return fetchReapplications(status)
 }
 
+export function getReapplicationAutomationStatus(): Promise<ReapplicationAutomationStatus> {
+  return fetchReapplicationAutomationStatus()
+}
+
 export function getReapplication(id: number): Promise<ReapplicationCampaign> {
   return fetchReapplication(id)
 }
@@ -350,7 +384,7 @@ export function getAccounts(): Promise<Account[]> {
 export function syncAccounts(): Promise<AccountSyncResult> {
   if (USE_MOCK) {
     return resolve(
-      { profiles_scanned: 0, enrolled: [], failed: [], ambiguous: [], no_number_count: 0, total: mockAccounts.length },
+      { profiles_scanned: 0, enrolled: [], refreshed: [], failed: [], ambiguous: [], no_number_count: 0, total: mockAccounts.length },
       300,
     )
   }
@@ -379,6 +413,19 @@ export function logout(): Promise<void> {
   return USE_MOCK ? resolve(undefined) : realLogout()
 }
 
+export function getEffectiveSettings(): Promise<EffectiveSettings> {
+  return USE_MOCK ? resolve(structuredClone(mockEffectiveSettings)) : fetchEffectiveSettings()
+}
+
+export function saveEffectiveSettings(
+  revision: string,
+  changes: Record<string, number>,
+): Promise<SettingsPatchResult> {
+  return USE_MOCK
+    ? resolve(patchMockEffectiveSettings(revision, changes))
+    : patchEffectiveSettings(revision, changes)
+}
+
 /* ---------- 阶段 3 任务队列写接口（真实模式接后端；Mock 模式保持演示桩） ---------- */
 
 /** 创建任务（真实模式：diagnose/dry_run POST 后端白名单接口；Mock：返回伪造 ID） */
@@ -387,7 +434,12 @@ export function createJob(payload: NewJobPayload): Promise<{ jobId: string }> {
     void payload
     return resolve({ jobId: `job-mock-${Date.now()}` }, 300)
   }
-  const body: JobCreatePayload = { account: payload.accountId, brands: payload.brands, site: payload.site }
+  const body: JobCreatePayload = {
+    account: payload.accountId,
+    brands: payload.brands,
+    site: payload.site,
+    options: payload.options,
+  }
   const call = payload.mode === 'diagnose' ? createDiagnoseJob(body) : createDryRunJob(body)
   return call.then((job) => ({ jobId: job.id }))
 }
@@ -411,6 +463,7 @@ function mockRawJob(jobId: string, payload: NewJobPayload, runStatus: Automation
     account_id: payload.accountId,
     marketplace: payload.site,
     brands: payload.brands,
+    options: payload.options,
     pid: null,
     exit_code: null,
     error_class: null,
@@ -429,7 +482,12 @@ function mockRawJob(jobId: string, payload: NewJobPayload, runStatus: Automation
  */
 export function createSubmit(payload: NewJobPayload): Promise<SubmitJobResponse> {
   if (!USE_MOCK) {
-    const body: JobCreatePayload = { account: payload.accountId, brands: payload.brands, site: payload.site }
+    const body: JobCreatePayload = {
+      account: payload.accountId,
+      brands: payload.brands,
+      site: payload.site,
+      options: payload.options,
+    }
     return createSubmitJob(body)
   }
   const jobId = `job-mock-submit-${Date.now()}`

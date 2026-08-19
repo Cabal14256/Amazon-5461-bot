@@ -118,3 +118,58 @@ def test_query_profiles_falls_back_to_v1_after_v2_failure(monkeypatch):
         None,
     )
     assert result["profiles"][0]["profile_id"] == "legacy-profile"
+
+
+def test_restart_profile_retries_transient_stop_start_handoff(monkeypatch):
+    client = AdsPowerClient(min_interval_sec=0)
+    starts = []
+    sleeps = []
+
+    def fail_stop(**_kwargs):
+        raise AdsPowerAPIError("profile is transitioning")
+
+    def start_after_transition(**kwargs):
+        starts.append(kwargs)
+        if len(starts) == 1:
+            raise AdsPowerAPIError("profile is still stopping")
+        return {"ws_endpoint": "ws://127.0.0.1:9222/devtools/browser/example"}
+
+    monkeypatch.setattr(client, "stop_profile", fail_stop)
+    monkeypatch.setattr(client, "start_profile", start_after_transition)
+    monkeypatch.setattr(
+        client,
+        "wait_for_cdp_ready",
+        lambda *_args, **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr("src.adspower_client.time.sleep", sleeps.append)
+
+    result = client.restart_profile("profile-private", restart_wait_sec=0.25)
+
+    assert len(starts) == 2
+    assert sleeps == [0.25, 0.25]
+    assert starts[0]["launch_args"] == ["--remote-allow-origins=*"]
+    assert result["restarted"] is True
+    assert result["started_now"] is True
+
+
+def test_restart_profile_stops_after_bounded_start_retries(monkeypatch):
+    client = AdsPowerClient(min_interval_sec=0)
+    starts = []
+
+    monkeypatch.setattr(client, "stop_profile", lambda **_kwargs: None)
+
+    def fail_start(**_kwargs):
+        starts.append(True)
+        raise AdsPowerAPIError("temporarily unavailable")
+
+    monkeypatch.setattr(client, "start_profile", fail_start)
+    monkeypatch.setattr("src.adspower_client.time.sleep", lambda _seconds: None)
+
+    try:
+        client.restart_profile("profile-private", restart_wait_sec=0)
+    except AdsPowerAPIError as exc:
+        assert "bounded retry" in str(exc)
+    else:
+        raise AssertionError("persistent start failure should be surfaced")
+
+    assert len(starts) == 2

@@ -70,8 +70,9 @@ def sync_accounts(
 
     report = discover_new_accounts(profiles)
     enrolled: list[dict[str, str]] = []
+    refreshed: list[dict[str, str]] = []
     failed: list[dict[str, str]] = []
-    if report["new"]:
+    if report["new"] or report["refresh"]:
         backup_accounts()
         for item in report["new"]:
             try:
@@ -84,6 +85,22 @@ def sync_accounts(
                 })
             except Exception as exc:  # 单个失败不阻断其余登记
                 failed.append({"account_id": str(item["account_id"]), "error": str(exc)[:200]})
+        profiles_by_id = {
+            str(profile.get("user_id") or profile.get("profile_id") or profile.get("id") or "").strip(): profile
+            for profile in profiles
+        }
+        for item in report["refresh"]:
+            try:
+                profile = profiles_by_id[str(item["profile_id"])]
+                meta = aad.refresh_existing_account_from_profile(item["account_id"], profile)
+                acc = meta["account"]
+                refreshed.append({
+                    "account_id": str(acc.get("account_id") or ""),
+                    "marketplace": str(acc.get("marketplace") or ""),
+                    "status": str(acc.get("status") or ""),
+                })
+            except Exception as exc:
+                failed.append({"account_id": str(item["account_id"]), "error": str(exc)[:200]})
 
     payload = read_json_tolerant(settings.accounts_path)
     rows = payload.get("accounts") if isinstance(payload, dict) else []
@@ -92,11 +109,16 @@ def sync_accounts(
     record_web_audit(
         str(settings.db_path), action="accounts_sync", actor_id=int(user["id"]),
         target_type="catalog", target_id="accounts",
-        result=f"ok:enrolled={len(enrolled)},failed={len(failed)}", ip_address=ip,
+        result=(
+            f"ok:enrolled={len(enrolled)},refreshed={len(refreshed)},"
+            f"failed={len(failed)}"
+        ),
+        ip_address=ip,
     )
     return {
         "profiles_scanned": report["profiles_scanned"],
         "enrolled": enrolled,
+        "refreshed": refreshed,
         "failed": failed,
         "ambiguous": [
             {"account_num": a.get("account_num"), "reason": str(a.get("reason") or "")}

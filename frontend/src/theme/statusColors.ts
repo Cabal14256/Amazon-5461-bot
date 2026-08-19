@@ -39,6 +39,12 @@ export const businessStatusMeta: Record<BusinessStatus, StatusMeta> = {
   partial: { label: '部分完成', color: '#eab308' },
   failed: { label: '失败', color: '#d03050' },
   error: { label: '异常', color: '#d03050' },
+  waiting_case_id: { label: '正在找回 Case ID', color: '#f0a020', pulse: true },
+  waiting_case: { label: '等待 Case 最终回复', color: '#3b82f6', pulse: true },
+  waiting_login: { label: '等待重新登录', color: '#8b5cf6', pulse: true },
+  waiting_reconciliation: { label: '提交结果确认中', color: '#f0a020', pulse: true },
+  manual_review: { label: '等待人工确认', color: '#d03050' },
+  resolved: { label: '已恢复自动处理', color: '#18a058' },
 }
 
 /** incident 状态机 13 态 */
@@ -137,17 +143,24 @@ export interface StatusTagSpec {
   status: string
 }
 
-/** 重新申请 campaign 状态 -> run/incident 色系语义映射（复用 StatusTag） */
+/** 重新申请 campaign 状态 -> run/business/incident 色系语义映射（复用 StatusTag） */
 export function campaignTag(status: string): StatusTagSpec {
   switch (status) {
+    case 'draft':
+      return { kind: 'business', status: 'draft' }
     case 'scheduled':
     case 'next_scheduled':
       return { kind: 'run', status: 'queued' }
     case 'running':
       return { kind: 'run', status: 'running' }
     case 'waiting_case_id':
+      return { kind: 'business', status: 'waiting_case_id' }
     case 'waiting_case':
-      return { kind: 'run', status: 'waiting_human' }
+      return { kind: 'business', status: 'waiting_case' }
+    case 'waiting_login':
+      return { kind: 'business', status: 'waiting_login' }
+    case 'waiting_reconciliation':
+      return { kind: 'business', status: 'waiting_reconciliation' }
     case 'paused':
       return { kind: 'run', status: 'stop_requested' }
     case 'blocked':
@@ -166,6 +179,8 @@ export function campaignTag(status: string): StatusTagSpec {
 /** 重新申请 attempt / Case ID 找回队列状态 -> run/incident 色系语义映射 */
 export function attemptTag(status: string): StatusTagSpec {
   switch (status) {
+    case 'draft':
+      return { kind: 'business', status: 'draft' }
     case 'scheduled':
     case 'pending':
       return { kind: 'run', status: 'queued' }
@@ -175,6 +190,14 @@ export function attemptTag(status: string): StatusTagSpec {
       return { kind: 'run', status: 'running' }
     case 'submitted':
       return { kind: 'business', status: 'under_review' }
+    case 'waiting_case_id':
+      return { kind: 'business', status: 'waiting_case_id' }
+    case 'waiting_case':
+      return { kind: 'business', status: 'waiting_case' }
+    case 'waiting_login':
+      return { kind: 'business', status: 'waiting_login' }
+    case 'waiting_reconciliation':
+      return { kind: 'business', status: 'waiting_reconciliation' }
     case 'completed':
       return { kind: 'run', status: 'completed' }
     case 'skipped':

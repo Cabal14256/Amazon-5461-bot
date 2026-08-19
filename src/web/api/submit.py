@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from src.db import create_automation_job, record_web_audit
 from src.jobs.preflight import run_submit_preflight
-from src.web.api.jobs import _client_ip, _validate_job_request
+from src.web.api.jobs import _client_ip, _validate_job_options, _validate_job_request
 from src.web.deps import get_settings, require_role
 from src.web.schemas import AutomationJobOut, JobCreateRequest, SubmitJobResponse
 
@@ -66,10 +66,16 @@ def create_submit_job(
 
     try:
         account_row, brands, site = _validate_job_request(settings, body)
+        options = _validate_job_options(body, "submit")
     except HTTPException as exc:
         _audit(settings, "job_submit_created", user, target,
                f"rejected:{exc.detail}", ip)
         raise
+    except ValueError as exc:
+        reason = str(exc)
+        _audit(settings, "job_submit_created", user, target,
+               f"rejected:{reason}", ip)
+        raise HTTPException(status_code=422, detail=reason) from exc
 
     if len(brands) > int(settings.submit_max_brands):
         _reject(settings, "job_submit_created", user, target, "too_many_brands", ip,
@@ -92,11 +98,17 @@ def create_submit_job(
         marketplace=site,
         brands=brands,
         run_status="queued",
+        options=options,
     )
     _audit(
         settings, "job_submit_created", user, job["id"], "ok", ip,
         detail=json.dumps(
-            {"account": job["account_id"], "site": site, "brands": brands},
+            {
+                "account": job["account_id"],
+                "site": site,
+                "brands": brands,
+                **({"options": options} if options else {}),
+            },
             ensure_ascii=False,
         ),
     )

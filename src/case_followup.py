@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .approved_case_verification import verify_approved_case
+from .auth_guard import auth_block_reason
 from .browser_manager import BrowserConnectionError, BrowserManager
 from .config_loader import load_yaml
 from .db import (
@@ -142,18 +143,7 @@ def _sellercentral_home_url(site: str) -> str:
 
 
 def _auth_block_reason(page) -> str | None:
-    url = (getattr(page, "url", "") or "").lower()
-    try:
-        text = (page.locator("body").inner_text(timeout=5_000) or "").lower()
-    except Exception:
-        text = ""
-    if "/ap/signin" in url or "sign in to your account" in text:
-        return "seller_central_login_required"
-    if "captcha" in url or "enter the characters you see" in text:
-        return "captcha_required"
-    if any(token in text for token in ("two-step verification", "two factor authentication", "verification code")):
-        return "two_factor_authentication_required"
-    return None
+    return auth_block_reason(page)
 
 
 def _save_page_evidence(page, out_dir: Path, prefix: str) -> list[str]:
@@ -252,6 +242,11 @@ class CaseFollowupBrowserSession:
                 "后续同站点 Case 跳过市场切换"
             )
             return self.page, self.account
+        except CaseFollowupBlocked:
+            # Keep the exact login/challenge tab visible in AdsPower.  The
+            # persistent auth block prevents another worker using this account.
+            self.detach_preserving_auth_page()
+            raise
         except Exception:
             self.close()
             raise
@@ -281,6 +276,17 @@ class CaseFollowupBrowserSession:
                     "[CaseFollowup] AdsPower 浏览器关闭失败: "
                     f"{type(exc).__name__}"
                 )
+
+    def detach_preserving_auth_page(self) -> None:
+        """Release Playwright ownership without closing the blocked profile."""
+
+        manager = self.manager
+        self.ready = False
+        self.page = None
+        self.account = None
+        self.manager = None
+        if manager is not None:
+            manager.disconnect(quiet=True)
 
     def cleanup_after_case(self) -> None:
         """Close popup or abandoned tabs while retaining the shared work page."""
@@ -803,12 +809,27 @@ def _handle_reapplication_transition(
     result: dict[str, Any],
 ) -> None:
     try:
-        from .reapplication import handle_case_outcome, launch_reapplication_worker
+        from .reapplication import (
+            auto_schedule_declined_case,
+            handle_case_outcome,
+            launch_reapplication_worker,
+        )
 
         transition = handle_case_outcome(settings, task, result)
+        if (
+            transition.get("status") == "not_linked"
+            and str(result.get("result") or "").strip().lower() == "declined"
+        ):
+            transition = auto_schedule_declined_case(
+                settings,
+                int(task["id"]),
+                launch_worker=True,
+            )
         result["reapplication_transition"] = transition
         if transition.get("status") == "next_scheduled":
             result["reapplication_worker"] = launch_reapplication_worker(settings)
+        elif transition.get("worker"):
+            result["reapplication_worker"] = transition["worker"]
     except Exception as exc:  # Never change the authoritative Case result.
         result["reapplication_transition"] = {
             "status": "error",
@@ -1042,6 +1063,22 @@ def process_claimed_followup(
             if update_records:
                 record_case_outcome(settings, task, result)
     elif outcome == "blocked":
+        from .auth_recovery import create_auth_block
+
+        auth_block = create_auth_block(
+            settings,
+            account_id=str(task["account_id"]),
+            marketplace=str(task["marketplace"]),
+            brand_name=str(task["brand_name"]),
+            block_type=str(reason or "login_required"),
+            phase="case_followup",
+            source_type="case_followup",
+            source_id=int(task["id"]),
+            submit_fenced=True,
+            evidence_path=str(evidence_path or ""),
+            detail=reason,
+        )
+        result["auth_block_id"] = int(auth_block["id"])
         finish_case_followup(
             db_path, task["id"], "blocked", outcome, case_status, reason, evidence_path, error=reason
         )
@@ -1185,6 +1222,28 @@ def process_due_case_followups(
                 f"[CaseFollowup] 结果 Case {task['case_id']}: "
                 f"{result.get('result')} ({result.get('decision_reason', '')})"
             )
+            if result.get("result") == "blocked":
+                # The block may have appeared after the shared session was
+                # established (for example while loading a Case detail).  Do
+                # this before the outer finally so it cannot stop the exact
+                # AdsPower profile/page needed for human login recovery.
+                active_session.detach_preserving_auth_page()
+                next_run = _db_datetime(datetime.now())
+                for sibling in claimed[index + 1:]:
+                    if sibling["account_id"] != task["account_id"]:
+                        continue
+                    reschedule_case_followup(
+                        db_path,
+                        int(sibling["id"]),
+                        next_run,
+                        "blocked",
+                        str(sibling.get("case_status") or ""),
+                        "waiting_for_account_login",
+                        sibling.get("evidence_path"),
+                        error="waiting_for_account_login",
+                    )
+                    deferred_claimed_ids.add(int(sibling["id"]))
+                continue
             technical_error_code = str(result.get("technical_error_code") or "")
             if not (
                 config.get("connection_circuit_breaker", True)
@@ -1259,7 +1318,9 @@ def _pid_running(pid: int) -> bool:
         return False
     try:
         os.kill(pid, 0)
-    except OSError:
+    except (OSError, SystemError, ValueError, OverflowError):
+        # CPython on Windows can wrap an invalid/stale PID OSError in
+        # SystemError.  A stale worker marker must not prevent relaunch.
         return False
     return True
 

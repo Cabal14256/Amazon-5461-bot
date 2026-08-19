@@ -234,6 +234,71 @@ def cmd_reapply_status(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reapply_resume_draft(args: argparse.Namespace) -> int:
+    """Resume one exact fenced attempt after machine-confirmed Dashboard Draft."""
+
+    from src.config_loader import load_yaml
+    from src.reapplication import (
+        ReapplicationStartError,
+        confirmed_draft_confirmation,
+        get_attempt,
+        launch_reapplication_worker,
+        rearm_confirmed_draft_attempt,
+    )
+
+    settings = load_yaml(str(PROJECT_ROOT / "config" / "settings.yaml"))
+    account_id = _normalized_account_id(args.account)
+    site = str(args.site or "").strip().upper()
+    attempt = get_attempt(settings, int(args.attempt_id))
+    if not attempt:
+        print("[preflight] 未找到指定重申请 attempt", file=sys.stderr)
+        return 2
+    if (
+        str(attempt["account_id"]) != account_id
+        or str(attempt["brand_name"]).casefold() != str(args.brand).strip().casefold()
+        or str(attempt["site"]).upper() != site
+    ):
+        print("[safety] attempt 与 account/site/brand 精确范围不一致", file=sys.stderr)
+        return 2
+    confirmation = confirmed_draft_confirmation(settings, int(args.attempt_id))
+    if not confirmation:
+        print(
+            "[safety] 没有找到精确、已导航且留有证据的 Catalog Authorization Draft",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.submit:
+        print(
+            f"[dry-run] 已确认 Draft，可恢复: attempt={args.attempt_id} "
+            f"{account_id}/{site}/{attempt['brand_name']} source={confirmation['source']}"
+        )
+        print("[dry-run] 未解除提交安全锁、未启动浏览器、未提交申请")
+        return 0
+    if not args.yes:
+        print("[safety] 恢复 Draft 真实提交还需要 --yes", file=sys.stderr)
+        return 2
+    try:
+        result = rearm_confirmed_draft_attempt(
+            settings,
+            int(args.attempt_id),
+            authorized_by="explicit_cli_request",
+        )
+    except ReapplicationStartError as exc:
+        print(f"[safety] Draft 恢复被拒绝: {exc.code}", file=sys.stderr)
+        return 2
+    print(
+        f"[Reapplication] Draft 已恢复: attempt={result['attempt_id']} "
+        f"source={result['confirmation_source']} scheduled_at={result['scheduled_at']}"
+    )
+    if not args.no_worker:
+        worker = launch_reapplication_worker(settings)
+        if worker.get("started"):
+            print(f"[Reapplication] 后台 worker 已启动，PID={worker.get('pid')}")
+        else:
+            print(f"[Reapplication] worker 未新启: {worker.get('reason')}")
+    return 0
+
+
 def cmd_repair_uat(args: argparse.Namespace) -> int:
     """Run the migration/evidence/switch audit before one read-only triage."""
     from src.codex_client.availability import check_availability
@@ -437,6 +502,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("reapply-status", help="List local reapplication campaign states")
     p.set_defaults(func=cmd_reapply_status)
+
+    p = sub.add_parser(
+        "reapply-resume-draft",
+        help="Resume one exact fenced reapplication attempt after confirmed Dashboard Draft",
+    )
+    p.add_argument("--attempt-id", type=int, required=True)
+    p.add_argument("--account", required=True)
+    p.add_argument("--brand", required=True)
+    p.add_argument("--site", required=True)
+    p.add_argument("--submit", action="store_true", help="Authorize this exact Draft retry")
+    p.add_argument("--yes", action="store_true", help="Required confirmation for a real retry")
+    p.add_argument("--no-worker", action="store_true", help="Rearm without starting the worker")
+    p.set_defaults(func=cmd_reapply_resume_draft)
 
     p = sub.add_parser("repair-uat", help="Migrate, gate-check and optionally run one read-only Codex triage")
     p.add_argument("--incident-id", type=int, required=True)

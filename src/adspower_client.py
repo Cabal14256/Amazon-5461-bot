@@ -203,18 +203,43 @@ class AdsPowerClient:
         restart_wait_sec: float = 5.0,
         **start_kwargs,
     ) -> Dict[str, Any]:
-        """Fully restart one profile and wait for a usable DevTools endpoint."""
-        self.stop_profile(profile_id=profile_id, serial_number=serial_number)
-        time.sleep(max(0.0, restart_wait_sec))
+        """Fully restart one profile and wait for a usable DevTools endpoint.
+
+        AdsPower can briefly reject both the stop response and the first start
+        request while a profile is changing state.  Treat that hand-off as a
+        bounded transient condition; a persistent failure still surfaces after
+        one retry.
+        """
+        stop_error: AdsPowerAPIError | None = None
+        try:
+            self.stop_profile(profile_id=profile_id, serial_number=serial_number)
+        except AdsPowerAPIError as exc:
+            stop_error = exc
+        wait_seconds = max(0.0, restart_wait_sec)
+        time.sleep(wait_seconds)
         launch_args = list(start_kwargs.pop("launch_args", []) or [])
         if "--remote-allow-origins=*" not in launch_args:
             launch_args.append("--remote-allow-origins=*")
-        started = self.start_profile(
-            profile_id=profile_id,
-            serial_number=serial_number,
-            launch_args=launch_args,
-            **start_kwargs,
-        )
+        started: dict[str, Any] | None = None
+        start_error: AdsPowerAPIError | None = None
+        for attempt in range(2):
+            try:
+                started = self.start_profile(
+                    profile_id=profile_id,
+                    serial_number=serial_number,
+                    launch_args=launch_args,
+                    **start_kwargs,
+                )
+                break
+            except AdsPowerAPIError as exc:
+                start_error = exc
+                if attempt == 0:
+                    time.sleep(wait_seconds)
+        if started is None:
+            transition = " after an inconclusive stop response" if stop_error else ""
+            raise AdsPowerAPIError(
+                f"AdsPower profile restart remained unavailable after bounded retry{transition}"
+            ) from start_error
         health = self.wait_for_cdp_ready(
             str(started.get("ws_endpoint") or ""),
             timeout_sec=ready_timeout_sec,

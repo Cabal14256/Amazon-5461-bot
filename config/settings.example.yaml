@@ -72,10 +72,16 @@ case_id_recovery:
   poll_interval_seconds: 60
   auto_start_worker: true
 
-# Finite route: only an explicitly authorized campaign may submit. A declined
-# or false-approved Case advances once after 2 hours; technical errors pause.
+# Finite route. When automatic authorization is enabled, the original explicit
+# real-submit scope carries forward. Only declined advances; false approval,
+# unknown replies, and technical errors stay on the current site or pause.
 reapplication:
   enabled: true
+  auto_authorize_declined_cases: false
+  auto_backfill_declined_cases: false
+  auto_backfill_limit: 100
+  # Inclusive case_followups.id cutoff; 0 means no cutoff.
+  auto_backfill_min_followup_id: 0
   decline_delay_hours: 2.0
   poll_interval_seconds: 60
   busy_retry_minutes: 10
@@ -146,6 +152,11 @@ web:
   submit_enabled: true
   # Hard cap on brands per real-submission job (preflight blocker + 422).
   submit_max_brands: 5
+
+# Login expiry/challenge recovery.  Checks are passive: the automation never
+# fills credentials and never attempts to solve CAPTCHA, 2FA, or risk checks.
+auth_recovery:
+  poll_interval_seconds: 300
 
 # Stage-5 persisted anomaly detection (repair incident queue).
 incidents:

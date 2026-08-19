@@ -142,3 +142,67 @@ def test_draft_failure_keeps_failed_state_and_continues_next_brand(monkeypatch, 
     assert result_state["batches"][0]["items"][1]["status"] == "completed"
     assert result_state["summary"] == {"total": 2, "completed": 1, "failed": 1, "pending": 0}
     assert "自动跳过当前品牌" in capsys.readouterr().out
+
+
+def test_login_pause_preserves_exact_auth_page_and_stops_same_account(monkeypatch):
+    batch = _import_batch_module()
+    context = _FakeContext()
+    browser = SimpleNamespace(contexts=[context])
+    fake_playwright = _FakePlaywright()
+
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: fake_playwright)
+    monkeypatch.setattr(batch, "_cdp_connect", lambda *args, **kwargs: browser)
+    monkeypatch.setattr(
+        "scripts._flow_cli_common.load_runtime",
+        lambda *args, **kwargs: (
+            {"browser": {}},
+            {"adspower_profile_id": "profile-test"},
+            {},
+            "UK",
+            {},
+            "ws://fake",
+        ),
+    )
+    monkeypatch.setattr(batch, "schedule_followup_for_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(batch, "schedule_case_id_recovery_for_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(batch, "stop_file_requested", lambda: False)
+    navigated_home = []
+    monkeypatch.setattr(
+        batch,
+        "navigate_group_home",
+        lambda *args, **kwargs: navigated_home.append(True),
+    )
+    paused_pages = []
+
+    def _waiting_login(_item, *args, **kwargs):
+        page = kwargs["page"]
+        page.goto("https://sellercentral.amazon.co.uk/ap/signin")
+        paused_pages.append(page)
+        return {
+            "status": "waiting_login",
+            "note": "login_required",
+            "auth_block_id": 1,
+        }
+
+    monkeypatch.setattr(batch, "run_single_item", _waiting_login)
+    state = {
+        "config": {"delay_between_items_min": 0, "delay_between_items_max": 0},
+        "summary": {"total": 2, "completed": 0, "failed": 0, "pending": 2},
+        "batches": [{
+            "batch_no": 1,
+            "status": "pending",
+            "items": [
+                {"account_id": "us_store_test", "brand_name": "FIRST", "site": "UK", "status": "pending"},
+                {"account_id": "us_store_test", "brand_name": "SECOND", "site": "UK", "status": "pending"},
+            ],
+        }],
+    }
+
+    result_state = batch.run_batch(state, 1, dry_run=False, enable_monitor=False)
+
+    assert result_state["batches"][0]["status"] == "waiting_human"
+    assert result_state["batches"][0]["items"][0]["status"] == "waiting_human"
+    assert result_state["batches"][0]["items"][1]["status"] == "pending"
+    assert navigated_home == []
+    assert paused_pages[0].url.endswith("/ap/signin")
+    assert not paused_pages[0].is_closed()

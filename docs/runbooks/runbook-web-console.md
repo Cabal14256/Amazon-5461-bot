@@ -189,6 +189,29 @@ SQLite 已启用 WAL 模式：`runtime/state/ledger.db` 会伴随
 - 任务进入终态服务端自动关流。前端断线后降级为 5s 轮询并在日志提示。
 - 历史日志尾部：`GET /api/jobs/{id}/logs?stream=stdout&lines=200`（脱敏）。
 
+### 8.6 人工暂停、权威业务态与安全续跑
+
+- `waiting_human` 只是运行态总类，详情必须继续区分
+  `waiting_login`、`waiting_reconciliation` 和 `manual_review`。未知原因显示
+  「等待人工处理」，不得默认写成重新登录。读取旧任务时，API 会用该任务的
+  submission checkpoint / auth block 修正已过时的 `error_class`，但不改写
+  历史任务行。
+- 品牌明细保留原始 `run_status` / `business_status` 作为执行审计，同时返回
+  `authoritative`（自动处理检查点 > Case 跟进结果 > 当天 Dashboard > 含
+  Case ID 的提交记录 > 本地批次状态）。前端每 5 秒刷新详情，并显示状态来源、
+  核对时间和简要说明；后续业务结论不会伪装成一次新的执行结果。
+- 只有真正解析到的 Amazon 消息才显示在「Case 最新回复」。AdsPower、浏览器、
+  网络或 worker 异常使用「Case 跟进技术异常」来源；来源标签与补充说明分栏渲染，
+  不重复拼接同一个标签。
+- `waiting_case_id` 和 `waiting_case` 分别显示「正在找回 Case ID」与「等待 Case
+  最终回复」，二者均为自动处理中的业务态，不显示「待人工介入」。没有 auth block
+  的普通 checkpoint 不显示「登录中断阶段」和「最近登录检测」。
+- 提交点击围栏后的 Case-ID 对账只更新精确匹配的账号/站点/品牌。只有恢复到
+  唯一 Case ID，且对应 job `batch_state.json` 已原子改写为该品牌 completed，
+  才允许把仍为 pending 的后续品牌重新入队。已完成、已跳过和此前失败的品牌
+  都不会隐式重试。状态文件缺失、目标不唯一、仍有其他人工暂停或结果需人工
+  核对时保持 `waiting_human`，禁止盲目续跑或再次点击 Submit。
+
 ## 9. 真实提交（阶段 4）
 
 真实提交走单一显式接口，全程留有审计；不做批量/多账号提交。

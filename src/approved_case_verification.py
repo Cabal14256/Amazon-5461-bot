@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
+from .auth_guard import auth_block_reason
 from .form_filler import KatalFormFiller
 
 MANAGE_FOUND = "found"
@@ -201,16 +202,7 @@ def _page_text(page) -> str:
 
 
 def _auth_block_reason(page, text: str = "") -> str | None:
-    url = (getattr(page, "url", "") or "").casefold()
-    text_lower = (text or _page_text(page)).casefold()
-    if "/ap/signin" in url:
-        return "seller_central_login_required"
-    if "captcha" in url:
-        return "captcha_required"
-    for reason, markers in _AUTH_TEXT_MARKERS.items():
-        if any(marker in text_lower for marker in markers):
-            return reason
-    return None
+    return auth_block_reason(page, text)
 
 
 def _save_evidence(page, out_dir: Path, prefix: str) -> list[str]:
@@ -373,6 +365,37 @@ def _connect_approval_message_matches(text: str, brand_name: str) -> bool:
         "You can close this panel and continue listing."
     )
     return bool(expected and expected in _normalize_text(text))
+
+
+def _connect_failure_marker(text: str, brand_name: str) -> str:
+    """Return only explicit Connect-brand business failures.
+
+    Amazon can replace the Connect-brand confirmation with an Apply-to-sell
+    application panel. Its generic labels are not sufficient on their own,
+    so require the panel's brand-specific listing-approval heading as well.
+    """
+    normalized = _normalize_text(text)
+    failure = next(
+        (marker for marker in _CONNECT_BRAND_FAILURE_MARKERS if marker in normalized),
+        "",
+    )
+    if failure:
+        return failure
+
+    normalized_brand = _normalize_text(brand_name)
+    brand_heading = f"listing approval for {normalized_brand}"
+    application_panel_markers = (
+        "submit required information",
+        "seller approval application",
+        "apply to sell",
+    )
+    if (
+        normalized_brand
+        and brand_heading in normalized
+        and any(marker in normalized for marker in application_panel_markers)
+    ):
+        return "listing approval application required"
+    return ""
 
 
 def _candidate_has_exact_brand(candidate: dict[str, Any], brand_name: str) -> bool:
@@ -646,10 +669,7 @@ def verify_connect_brand_authorization(
             if block:
                 evidence_files.extend(_save_evidence(page, evidence_dir, "connect_brand_blocked"))
                 return {"result": "blocked", "reason": block, "evidence_files": evidence_files}
-            failure = next(
-                (marker for marker in _CONNECT_BRAND_FAILURE_MARKERS if marker in text.casefold()),
-                "",
-            )
+            failure = _connect_failure_marker(text, brand_name)
             if failure:
                 evidence_files.extend(_save_evidence(page, evidence_dir, "connect_brand_no_result"))
                 return {
@@ -731,10 +751,7 @@ def verify_connect_brand_authorization(
                     "matched_keyword": candidate.get("matched_keyword") or "",
                     "evidence_files": evidence_files,
                 }
-            failure = next(
-                (marker for marker in _CONNECT_BRAND_FAILURE_MARKERS if marker in text.casefold()),
-                "",
-            )
+            failure = _connect_failure_marker(text, brand_name)
             if failure:
                 evidence_files.extend(_save_evidence(page, evidence_dir, "connect_brand_failed"))
                 return {
@@ -995,6 +1012,15 @@ def verify_add_product(
         core_fields_ready = bool(fill_results.get("brand_name")) and bool(
             fill_results.get("item_name")
         )
+        filled_text = _page_text(page).casefold()
+        filled_restriction = next(
+            (
+                marker
+                for marker in _ADD_PRODUCT_RESTRICTION_MARKERS
+                if marker in filled_text
+            ),
+            "",
+        )
         action = _find_add_product_action(
             page, bool(config.get("allow_new_ui_submit_as_continue", True))
         )
@@ -1010,14 +1036,16 @@ def verify_add_product(
             }
         if action.get("disabled"):
             result = ADD_PRODUCT_FAIL if core_fields_ready else "unknown"
-            reason = (
-                "Add Product 必要字段已填写，但 Continue/Next 仍不可用"
-                if result == ADD_PRODUCT_FAIL
-                else "Add Product 表单字段未能可靠填写，不能把按钮不可用判定为假过"
-            )
+            if result == ADD_PRODUCT_FAIL:
+                reason = "Add Product 必要字段已填写，但 Continue/Next 仍不可用"
+                if filled_restriction:
+                    reason += f"，页面明确显示授权限制: {filled_restriction}"
+            else:
+                reason = "Add Product 表单字段未能可靠填写，不能把按钮不可用判定为假过"
             return {
                 "result": result,
                 "reason": reason,
+                "restriction_marker": filled_restriction,
                 "url": page.url,
                 "fill_results": fill_results,
                 "ready_results": ready_results,
@@ -1097,9 +1125,15 @@ def verify_add_product(
             or "seller-qualification" in (page.url or "").casefold()
         ):
             detail = restriction or brand_selection or "seller-qualification"
+            explicit_restriction = restriction or (
+                "seller-qualification"
+                if "seller-qualification" in (page.url or "").casefold()
+                else ""
+            )
             return {
                 "result": ADD_PRODUCT_FAIL,
                 "reason": f"Add Product 未进入可用的 Description，检测到授权限制: {detail}",
+                "restriction_marker": explicit_restriction,
                 "url": page.url,
                 "fill_results": fill_results,
                 "ready_results": ready_results,
@@ -1163,8 +1197,18 @@ def combine_approved_verification(
     if manage_result == MANAGE_CONNECT_FAILED:
         return {"result": "false_approved", "is_success": False, "reason": reason}
 
-    # A missing/stale portfolio without a completed Connect brand probe cannot
-    # establish a fake approval, even if Add Product produced a conflicting UI.
+    # An explicit Add Product authorization restriction is independent business
+    # evidence. It remains decisive even when a stale portfolio leaves the
+    # Connect-brand probe technically unknown.
+    add_product_explicitly_restricted = (
+        add_result == ADD_PRODUCT_FAIL
+        and bool(str(add_product.get("restriction_marker") or "").strip())
+    )
+    if add_product_explicitly_restricted:
+        return {"result": "false_approved", "is_success": False, "reason": reason}
+
+    # A missing/stale portfolio without either a completed Connect-brand probe
+    # or explicit Add Product restriction remains retryable.
     if manage_result in {MANAGE_NOT_FOUND, MANAGE_CONNECT_UNKNOWN}:
         return {"result": "verification_pending", "is_success": None, "reason": reason}
 

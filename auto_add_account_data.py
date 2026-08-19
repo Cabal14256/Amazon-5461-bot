@@ -875,6 +875,67 @@ def extract_profile_fields(profile: dict[str, Any], account_id: str) -> dict[str
     }
 
 
+def refresh_existing_account_from_profile(
+    account: str,
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind one existing pending account to an already-validated AdsPower profile.
+
+    The caller must establish that the profile is the unique label/remark match.
+    This helper deliberately refuses to create accounts or replace a different
+    existing profile binding.
+    """
+    account_id = normalize_account_id(account)
+    profile_fields = extract_profile_fields(profile, account_id)
+    profile_id = str(profile_fields.get("adspower_profile_id") or "").strip()
+    if not profile_id:
+        raise ValueError("AdsPower profile 缺少 profile_id")
+
+    payload = load_accounts_payload()
+    for idx, existing in enumerate(payload["accounts"]):
+        if existing.get("account_id") != account_id:
+            continue
+
+        existing_profile_id = str(existing.get("adspower_profile_id") or "").strip()
+        if existing_profile_id and existing_profile_id != profile_id:
+            raise ValueError("账号已绑定不同的 AdsPower profile")
+
+        refreshed = dict(existing)
+        # Do not erase an existing login field when the profile-list endpoint
+        # omits it; profile id/status and non-empty metadata are still refreshed.
+        for key, value in profile_fields.items():
+            if value or key in {"adspower_profile_id", "status"}:
+                refreshed[key] = value
+
+        marketplace_configs = dict(refreshed.get("marketplace_configs") or {})
+        for mp_code, mp_cfg in MARKETPLACE_CONFIGS.items():
+            marketplace_configs.setdefault(
+                mp_code,
+                {
+                    "marketplace": mp_cfg["marketplace"],
+                    "domain": mp_cfg["domain"],
+                    "entry_url": mp_cfg["entry_url"],
+                    "item_type_keyword": mp_cfg["item_type_keyword"],
+                    "mons_sel_mkid": mp_cfg.get("mons_sel_mkid", ""),
+                },
+            )
+        refreshed["marketplace_configs"] = marketplace_configs
+
+        payload["accounts"][idx] = refreshed
+        payload["accounts"] = sorted(
+            payload["accounts"], key=lambda row: row.get("account_id", "")
+        )
+        save_json(ACCOUNTS_JSON_PATH, payload)
+        return {
+            "account": refreshed,
+            "created": False,
+            "matched_profile": True,
+            "refreshed": refreshed != existing,
+        }
+
+    raise ValueError(f"账号不存在: {account_id}")
+
+
 def _query_adspower_profiles_direct(account_id: str | None = None) -> list[dict[str, Any]]:
     """Fallback AdsPower scan when scripts/scan_adspower_accounts.py is absent."""
     try:

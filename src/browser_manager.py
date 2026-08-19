@@ -290,6 +290,11 @@ class BrowserManager:
             raise RuntimeError("浏览器未连接")
         return self._page
 
+    @property
+    def pages(self) -> list[Page]:
+        """Return a snapshot of attached pages without exposing the context."""
+        return list(self._context.pages) if self._context is not None else []
+
 
 @contextmanager
 def managed_browser(api_base_url: str = "http://127.0.0.1:50325"):

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 
 class _Model(BaseModel):
@@ -78,6 +78,39 @@ class ApplicationOut(_Model):
     case_id: str | None = None
     submit_result: str | None = None
     authoritative: StatusResolution
+    automation: dict[str, Any] | None = None
+
+
+class AuthBlockOut(_Model):
+    id: int
+    account_id: str
+    marketplace: str | None = None
+    brand_name: str | None = None
+    profile_hint: str
+    block_type: str
+    phase: str
+    source_type: str
+    source_id: str | None = None
+    status: str
+    submit_fenced: bool = False
+    evidence_path: str | None = None
+    detail: str | None = None
+    detected_at: str
+    last_checked_at: str | None = None
+    next_check_at: str | None = None
+    resolved_at: str | None = None
+    created_at: str
+    updated_at: str
+    can_open_profile: bool = False
+    can_verify_and_resume: bool = False
+
+
+class AuthBlockActionOut(_Model):
+    status: str
+    block_id: int | None = None
+    block_type: str | None = None
+    reason: str | None = None
+    actions: list[str] = []
 
 
 class CaseFollowupOut(_Model):
@@ -99,6 +132,7 @@ class CaseFollowupOut(_Model):
     error: str | None = None
     reapplication_campaign_id: int | None = None
     reapplication_attempt_id: int | None = None
+    auth_block_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -122,6 +156,7 @@ class CaseIdRecoveryOut(_Model):
     error: str | None = None
     reapplication_campaign_id: int | None = None
     reapplication_attempt_id: int | None = None
+    auth_block_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -140,6 +175,7 @@ class ReapplicationAttemptOut(_Model):
     final_result: str | None = None
     decision_reason: str | None = None
     error: str | None = None
+    auth_block_id: int | None = None
 
 
 class ReapplicationCampaignOut(_Model):
@@ -150,6 +186,7 @@ class ReapplicationCampaignOut(_Model):
     route: list[str] = []
     current_route_index: int = 0
     status: str
+    authorization_source: str = "manual"
     source_case_followup_id: int | None = None
     source_marketplace: str | None = None
     stop_reason: str | None = None
@@ -165,12 +202,29 @@ class ReapplicationStartRequest(_Model):
     authorize_submit: bool = False
 
 
+class JobOptions(BaseModel):
+    """Immutable, non-secret overrides accepted for one submit job."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    case_followup_delay_hours: float | None = Field(default=None, ge=0.1, le=168.0)
+    case_followup_enabled: StrictBool | None = None
+
+    @field_validator("case_followup_delay_hours", mode="before")
+    @classmethod
+    def _strict_delay_number(cls, value):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise ValueError("case_followup_delay_hours must be a number")
+        return value
+
+
 class JobCreateRequest(_Model):
     """POST /api/jobs/diagnose|dry-run|submit body."""
 
     account: str
     brands: list[str]
     site: str | None = None
+    options: JobOptions | None = None
 
 
 # 与前端 JobRunStatus 枚举（docs/plan §8 状态模型）对齐的 9 态。
@@ -197,12 +251,14 @@ class AutomationJobOut(_Model):
     account_id: str
     marketplace: str | None = None
     brands: list[str] = []
+    options: JobOptions = Field(default_factory=JobOptions)
     pid: int | None = None
     exit_code: int | None = None
     error_class: str | None = None
     # Read-time annotation for queued jobs: why the dispatcher is holding back
     # (waiting_case_followup / waiting_profile_lock / waiting_serial_queue).
     queue_reason: str | None = None
+    auth_block_id: int | None = None
     stop_requested_at: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
@@ -215,6 +271,41 @@ class SubmitJobResponse(_Model):
 
     job: AutomationJobOut
     preflight: list[dict[str, Any]] = []
+
+
+class SettingFieldOut(_Model):
+    key: str
+    group: str
+    label: str
+    value_type: str
+    value: bool | int | float
+    default: bool | int | float
+    unit: str = ""
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+    step: int | float | None = None
+    editable: bool
+    apply_mode: str
+    status: str
+    description: str
+
+
+class SettingsEffectiveOut(_Model):
+    revision: str
+    fields: list[SettingFieldOut]
+    limits: dict[str, int]
+    job_defaults: dict[str, Any]
+
+
+class SettingsPatchRequest(_Model):
+    revision: str
+    changes: dict[str, Any]
+
+
+class SettingsPatchOut(_Model):
+    snapshot: SettingsEffectiveOut
+    changed: dict[str, dict[str, Any]]
+    restart_required: list[str]
 
 
 class AutomationJobItemOut(_Model):
@@ -230,6 +321,10 @@ class AutomationJobItemOut(_Model):
     started_at: str | None = None
     finished_at: str | None = None
     note: str | None = None
+    # Read-time business truth.  The raw execution fields above remain an
+    # audit trail and are deliberately not overwritten by later Dashboard or
+    # Case evidence.
+    authoritative: StatusResolution | None = None
 
 
 class EvidenceItemOut(_Model):

@@ -16,6 +16,7 @@ const router = createRouter({
     { path: '/case-followups', name: 'case-followups', component: () => import('@/pages/CaseFollowUpsPage.vue'), meta: { title: 'Case 跟进' } },
     { path: '/pending', name: 'pending', component: () => import('@/pages/PendingPage.vue'), meta: { title: '待人工处理' } },
     { path: '/repair', name: 'repair', component: () => import('@/pages/RepairCenterPage.vue'), meta: { title: '修复中心' } },
+    { path: '/settings', name: 'settings', component: () => import('@/pages/SettingsPage.vue'), meta: { title: '系统设置', requiresAdmin: true } },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })
@@ -27,6 +28,7 @@ router.beforeEach(async (to) => {
   if (!auth.initialized) await auth.fetchMe()
   if (to.name === 'login') return auth.user ? { path: '/' } : true
   if (!auth.user) return { name: 'login', query: { redirect: to.fullPath } }
+  if (to.meta.requiresAdmin && !auth.isAdmin) return { path: '/' }
   return true
 })
 

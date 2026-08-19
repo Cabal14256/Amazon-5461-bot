@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from src.db import now_str
+from src.jobs.options import normalize_job_options
 from src.jobs.paths import JobPaths
 from src.state_files import atomic_write_json
 from src.windows_subprocess import no_window_kwargs
@@ -32,6 +33,7 @@ def build_job_command(job: dict[str, Any], paths: JobPaths) -> list[str]:
     job_type = str(job.get("job_type") or "")
     if job_type not in ALLOWED_JOB_TYPES:
         raise ValueError(f"非法任务类型: {job_type}")
+    options = normalize_job_options(job.get("options") or {}, job_type=job_type)
     account = str(job["account_id"])
     brands = [str(b) for b in (job.get("brands") or [])]
     if not brands:
@@ -62,10 +64,23 @@ def build_job_command(job: dict[str, Any], paths: JobPaths) -> list[str]:
         ]
     if site:
         cmd.extend(["--site", site])
+    if job_type == "submit":
+        if "case_followup_delay_hours" in options:
+            cmd.extend([
+                "--case-followup-delay-hours",
+                str(options["case_followup_delay_hours"]),
+            ])
+        if options.get("case_followup_enabled") is False:
+            cmd.append("--disable-case-followup")
     return cmd
 
 
-def build_job_env(paths: JobPaths, accounts_path: Path) -> dict[str, str]:
+def build_job_env(
+    paths: JobPaths,
+    accounts_path: Path,
+    *,
+    db_path: Path | None = None,
+) -> dict[str, str]:
     env = os.environ.copy()
     # Windows does not reliably interpret IANA ``TZ`` values loaded from
     # ``.env``; an inherited TZ can make the child start in the wrong timezone
@@ -78,6 +93,10 @@ def build_job_env(paths: JobPaths, accounts_path: Path) -> dict[str, str]:
     env["AMAZON5461_STOP_FILE"] = str(paths.stop_file)
     # Point the child at the same account catalog the web console validated.
     env["AMAZON5461_ACCOUNTS_PATH"] = str(accounts_path)
+    env["AMAZON5461_JOB_ID"] = str(paths.job_id)
+    env["AMAZON5461_RESUME"] = "1"
+    if db_path is not None:
+        env["AMAZON5461_DB_PATH"] = str(db_path)
     return env
 
 

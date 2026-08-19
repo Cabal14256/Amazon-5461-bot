@@ -1,16 +1,20 @@
 """API integration: whitelist validation, roles, full chain, SSE, audit."""
 
 import json
+import os
 
 import pytest
 from fastapi.testclient import TestClient
 
+from src.auth_recovery import ensure_submission_checkpoint
 from src.db import (
     add_web_user,
     create_automation_job,
     get_automation_job,
     get_conn,
+    replace_automation_job_items,
     update_automation_job,
+    upsert_case_outcome_status,
 )
 from src.jobs.manager import JobManager
 from src.web.app import create_app
@@ -212,6 +216,79 @@ def test_job_list_ignores_legacy_state_files(operator_client, job_env):
     assert response.json()["total"] == 0
 
 
+def test_job_detail_corrects_stale_waiting_login_reason(operator_client, job_env):
+    db = str(job_env.db_path)
+    job = create_automation_job(
+        db,
+        "job-20260818-stale-reason",
+        "submit",
+        "operator1",
+        ACTIVE_ACCOUNT,
+        "US",
+        ["TESTBRAND"],
+        run_status="waiting_human",
+    )
+    update_automation_job(db, job["id"], error_class="waiting_login")
+    checkpoint = ensure_submission_checkpoint(
+        db,
+        owner_type="automation_job",
+        owner_id=job["id"],
+        account_id=ACTIVE_ACCOUNT,
+        marketplace="US",
+        brand_name="TESTBRAND",
+    )
+    conn = get_conn(db)
+    conn.execute(
+        "UPDATE submission_checkpoints SET status='waiting_reconciliation' WHERE id=?",
+        (checkpoint["id"],),
+    )
+    conn.commit()
+    conn.close()
+
+    response = operator_client.get(f"/api/jobs/{job['id']}")
+
+    assert response.status_code == 200
+    assert response.json()["job"]["error_class"] == "waiting_reconciliation"
+
+
+def test_job_item_includes_authoritative_business_status(operator_client, job_env):
+    db = str(job_env.db_path)
+    job = create_automation_job(
+        db,
+        "job-20260818-authoritative",
+        "dry_run",
+        "operator1",
+        ACTIVE_ACCOUNT,
+        "US",
+        ["TESTBRAND"],
+    )
+    update_automation_job(db, job["id"], run_status="completed", exit_code=0)
+    replace_automation_job_items(db, job["id"], [{
+        "account_id": ACTIVE_ACCOUNT,
+        "marketplace": "US",
+        "brand_name": "TESTBRAND",
+        "run_status": "pending",
+        "business_status": "draft",
+    }])
+    upsert_case_outcome_status(
+        db,
+        ACTIVE_ACCOUNT,
+        "US",
+        "TESTBRAND",
+        "approved",
+        method="dashboard",
+    )
+
+    response = operator_client.get(f"/api/jobs/{job['id']}")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["run_status"] == "pending"
+    assert item["business_status"] == "draft"
+    assert item["authoritative"]["status"] == "approved"
+    assert item["authoritative"]["source"] == "dashboard_today"
+
+
 def test_request_stop_queued_job(operator_client, job_env, app):
     # Hold the profile lock so the running dispatcher cannot pick the job up;
     # the job stays queued deterministically.
@@ -328,7 +405,7 @@ def test_queued_job_reports_profile_lock_wait(operator_client, job_env):
 
     db = str(job_env.db_path)
     key = profile_key_for_account(job_env.accounts_path, ACTIVE_ACCOUNT)
-    owner = "case-followup:1:0:us_store_999:US"
+    owner = f"case-followup:{os.getpid()}:0:us_store_999:US"
     assert acquire_profile_lock(db, key, "case_followup_worker", owner, ttl_seconds=600)
     try:
         response = operator_client.post("/api/jobs/dry-run", json=VALID_BODY)
@@ -346,3 +423,11 @@ def test_queue_reason_absent_for_terminal_job(operator_client, job_env):
     job, _paths = _make_terminal_job_with_log(job_env, job_id="job-20260810-qr000001")
     detail = operator_client.get(f"/api/jobs/{job['id']}").json()["job"]
     assert detail["queue_reason"] is None
+
+
+def test_non_submit_job_rejects_submit_only_options(operator_client):
+    body = dict(VALID_BODY)
+    body["options"] = {"case_followup_enabled": False}
+    response = operator_client.post("/api/jobs/dry-run", json=body)
+    assert response.status_code == 422
+    assert response.json()["detail"] == "job_options_not_supported"

@@ -25,7 +25,7 @@ export function setUnauthorizedHandler(handler: () => void): void {
 }
 
 export interface ApiFetchOptions {
-  method?: 'GET' | 'POST'
+  method?: 'GET' | 'POST' | 'PATCH'
   body?: unknown
   query?: Record<string, string | number | null | undefined>
   /** 登录/会话探测接口的 401 由调用方处理，不触发全局跳登录页 */

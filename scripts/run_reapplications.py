@@ -17,12 +17,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config_loader import load_yaml, resolve_accounts_path  # noqa: E402
-from src.db import get_conn, init_db  # noqa: E402
+from src.db import (  # noqa: E402
+    acquire_profile_lock,
+    get_conn,
+    init_db,
+    release_profile_lock,
+)
+from src.jobs.profile_locks import profile_key_for_account  # noqa: E402
 from src.reapplication import (  # noqa: E402
     build_attempt_command,
     claim_due_attempt,
     get_attempt,
     get_reapplication_config,
+    mark_confirmed_draft_attempt,
     pause_attempt,
     reschedule_running_attempt,
     seconds_until_next_attempt,
@@ -35,7 +42,7 @@ def _pid_running(pid: int) -> bool:
         return False
     try:
         os.kill(pid, 0)
-    except OSError:
+    except (OSError, SystemError):
         return False
     return True
 
@@ -161,7 +168,32 @@ def process_one(settings: dict) -> dict | None:
         return None
     attempt_id = int(attempt["id"])
     config = get_reapplication_config(settings)
-    if _account_has_running_case(settings, str(attempt["account_id"])):
+    prerequisite_error = _validate_prerequisites(attempt)
+    if prerequisite_error:
+        return pause_attempt(settings, attempt_id, prerequisite_error, status="blocked")
+
+    db_path = str((settings.get("paths") or {}).get("db_path") or "./runtime/state/ledger.db")
+    accounts_path = resolve_accounts_path(
+        str((settings.get("paths") or {}).get("accounts_path") or "config/accounts.json")
+    )
+    profile_key = profile_key_for_account(accounts_path, str(attempt["account_id"]))
+    if not profile_key:
+        return pause_attempt(
+            settings,
+            attempt_id,
+            "account has no resolvable AdsPower profile lock key",
+            status="blocked",
+        )
+    owner_id = f"reapplication:{os.getpid()}:{attempt_id}:{attempt['account_id']}"
+    acquired = acquire_profile_lock(
+        db_path,
+        profile_key,
+        owner_type="reapplication_worker",
+        owner_id=owner_id,
+        ttl_seconds=7200,
+        pid_alive=_pid_running,
+    )
+    if not acquired:
         next_run = (
             datetime.now() + timedelta(minutes=int(config["busy_retry_minutes"]))
         ).strftime("%Y-%m-%d %H:%M:%S")
@@ -169,13 +201,9 @@ def process_one(settings: dict) -> dict | None:
             settings,
             attempt_id,
             next_run,
-            "account browser is in use by a Case follow-up",
+            "AdsPower profile is held by another worker",
         )
         return {"status": "rescheduled_busy", "attempt_id": attempt_id, "scheduled_at": next_run}
-
-    prerequisite_error = _validate_prerequisites(attempt)
-    if prerequisite_error:
-        return pause_attempt(settings, attempt_id, prerequisite_error, status="blocked")
 
     try:
         command, paths = build_attempt_command(settings, attempt)
@@ -208,8 +236,26 @@ def process_one(settings: dict) -> dict | None:
             attempt_id,
             f"attempt process launch failed: {exc.__class__.__name__}",
         )
+    finally:
+        release_profile_lock(db_path, profile_key, owner_id=owner_id)
 
     refreshed = get_attempt(settings, attempt_id)
+    if refreshed and refreshed.get("status") == "waiting_login":
+        return {
+            "status": "waiting_login",
+            "attempt_id": attempt_id,
+            "auth_block_id": refreshed.get("auth_block_id"),
+        }
+    if refreshed and refreshed.get("status") == "waiting_reconciliation":
+        from src.case_id_recovery import launch_case_id_recovery_worker
+
+        worker = launch_case_id_recovery_worker(settings)
+        return {
+            "status": "waiting_reconciliation",
+            "attempt_id": attempt_id,
+            "auth_block_id": refreshed.get("auth_block_id"),
+            "case_id_worker": worker,
+        }
     if refreshed and refreshed.get("status") == "waiting_case_id":
         from src.case_id_recovery import launch_case_id_recovery_worker
 
@@ -227,6 +273,9 @@ def process_one(settings: dict) -> dict | None:
             "case_followup_id": int(refreshed["case_followup_id"]),
             "case_worker": worker,
         }
+    draft = mark_confirmed_draft_attempt(settings, attempt_id)
+    if draft:
+        return draft
     reason = "batch ended without a linked Case follow-up"
     if return_code:
         reason += f" (exit_code={return_code})"

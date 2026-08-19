@@ -25,13 +25,17 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
+from src.auth_recovery import AuthRecoveryRunner
 from src.codex_client.auto_triage import AutoTriageRunner
+from src.config_loader import load_yaml
 from src.db import init_db, recover_stale_triage_jobs
 from src.jobs.manager import JobManager
+from src.reapplication import auto_schedule_declined_cases
 from src.repair.runner import RepairWorkflowRunner
 from src.web.api import (
     applications,
     auth,
+    auth_blocks,
     case_followups,
     case_id_recoveries,
     catalog,
@@ -45,8 +49,11 @@ from src.web.api import (
     submit,
     users,
 )
+from src.web.api import (
+    settings as settings_api,
+)
 from src.web.auth import LoginRateLimiter
-from src.web.config import WebSettings, load_settings
+from src.web.config import DEFAULT_SETTINGS_PATH, WebSettings, load_settings
 from src.web.deps import require_role
 from src.web.loop_noise import install_loop_noise_filter
 
@@ -80,6 +87,9 @@ def create_app(
     workflow_runner = repair_runner or RepairWorkflowRunner(
         settings, tick_seconds=settings.codex_workflow_poll_seconds
     )
+    auth_runner = AuthRecoveryRunner(
+        settings, poll_seconds=int(settings.auth_recovery_poll_seconds)
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -98,8 +108,19 @@ def create_app(
             # Keep the console available for manual recovery, while the
             # persisted operation/job state remains fail-closed.
             logger.exception("Startup Git reconciliation failed")
+        try:
+            runtime_settings = load_yaml(str(DEFAULT_SETTINGS_PATH)) or {}
+            runtime_settings.setdefault("paths", {})["db_path"] = str(settings.db_path)
+            auto_result = auto_schedule_declined_cases(runtime_settings)
+            if auto_result.get("created") or auto_result.get("errors"):
+                logger.info("Automatic declined-Case backfill: %s", auto_result)
+        except Exception:
+            # Automatic enrollment is best-effort and must never stop the
+            # read console or rewrite an authoritative Case outcome.
+            logger.exception("Automatic declined-Case backfill failed")
         manager.recover()
         manager.start()
+        auth_runner.start()
         # Stage-6 auto-triage scanner: fully degraded no-op while disabled.
         if settings.codex_enabled and settings.incidents_enabled:
             triage_runner.start()
@@ -107,6 +128,7 @@ def create_app(
             workflow_runner.recover()
             workflow_runner.start()
         yield
+        await auth_runner.stop()
         await workflow_runner.stop()
         await triage_runner.stop()
         # Cancel the dispatch loop only; running child processes keep going
@@ -119,6 +141,7 @@ def create_app(
     app.state.job_manager = manager
     app.state.triage_runner = triage_runner
     app.state.repair_runner = workflow_runner
+    app.state.auth_recovery_runner = auth_runner
     app.add_middleware(SecurityHeadersMiddleware)
 
     viewer = [Depends(require_role("viewer"))]
@@ -130,6 +153,7 @@ def create_app(
     app.include_router(jobs.router, prefix="/api", dependencies=viewer)
     app.include_router(submit.router, prefix="/api", dependencies=viewer)
     app.include_router(applications.router, prefix="/api", dependencies=viewer)
+    app.include_router(auth_blocks.router, prefix="/api", dependencies=viewer)
     app.include_router(case_followups.router, prefix="/api", dependencies=viewer)
     app.include_router(case_id_recoveries.router, prefix="/api", dependencies=viewer)
     app.include_router(reapplications.router, prefix="/api", dependencies=viewer)
@@ -137,6 +161,7 @@ def create_app(
     app.include_router(evidence.router, prefix="/api", dependencies=viewer)
     app.include_router(incidents.router, prefix="/api", dependencies=viewer)
     app.include_router(repair_jobs.router, prefix="/api", dependencies=viewer)
+    app.include_router(settings_api.router, prefix="/api", dependencies=viewer)
     app.include_router(users.router, prefix="/api", dependencies=admin)
 
     # Static frontend last so /api routes always win; skip silently when the

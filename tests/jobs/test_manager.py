@@ -119,6 +119,34 @@ def test_nonzero_exit_marks_failed(job_env):
     assert done["exit_code"] == 3
 
 
+def test_waiting_reconciliation_is_not_mislabeled_as_login(job_env):
+    state = {
+        "created_at": "2026-08-18T12:00:00",
+        "batches": [{
+            "batch_no": 1,
+            "status": "waiting_human",
+            "items": [{
+                "account_id": ACTIVE_ACCOUNT,
+                "brand_name": "TESTBRAND",
+                "site": "US",
+                "status": "waiting_human",
+                "result": {"status": "waiting_reconciliation"},
+            }],
+        }],
+    }
+    job = _create_job(settings=job_env, job_id="job-20260818-reconcile")
+    manager = _manager(job_env, batch_state=state)
+
+    manager.tick()
+    assert wait_for(lambda: manager._active["process"].poll() is not None)
+    manager.tick()
+
+    paused = get_automation_job(str(job_env.db_path), job["id"])
+    assert paused["run_status"] == "waiting_human"
+    assert paused["error_class"] == "waiting_reconciliation"
+    assert paused["finished_at"] is None
+
+
 def test_recovery_running_dead_pid_and_queued_continues(job_env):
     settings = job_env
     crashed = _create_job(settings, "job-20260810-00000005")

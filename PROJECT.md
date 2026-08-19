@@ -24,8 +24,18 @@ This project supports safe, evidence-driven Amazon Seller Central 5461 / GTIN / 
 
 - Default mode is read-only diagnosis or dry-run.
 - Real submission requires an explicit `--submit` or equivalent user instruction.
+- Automatic reapplication is a continuation of an explicitly scoped real
+  submission only when the reapplication auto-authorization switch has been
+  deliberately enabled. An inclusive persisted Case-row waterline may restrict
+  automatic enrollment to one approved rejection and later records. The finite
+  route, audit source, and technical-failure pause rules remain mandatory.
 - `Draft`, `Submitted no Case ID`, `Declined`, `Already Approved`, `Under Review`, and `Not Found` must remain separate states.
 - Missing Case ID is not automatically success or failure; check Dashboard / Selling Applications first.
+- Seller Central login expiry, CAPTCHA, 2FA, account-risk, or an unknown auth
+  page pauses the exact AdsPower profile. A durable submit-click fence is
+  written before the click; once fenced, recovery may reconcile Dashboard/Case
+  only and must never click Submit again. See
+  `docs/runbooks/runbook-auth-recovery.md`.
 
 ## Runtime layout
 

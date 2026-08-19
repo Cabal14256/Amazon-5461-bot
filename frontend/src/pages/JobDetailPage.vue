@@ -32,6 +32,7 @@ onUnmounted(() => {
 })
 
 const job = computed(() => jobsStore.currentJob)
+const jobOptions = computed(() => job.value?.raw.options ?? {})
 
 const typeLabel: Record<JobType, string> = {
   apply_5461: '5461 申请',
@@ -48,7 +49,32 @@ const queueReasonLabel: Record<string, string> = {
   waiting_case_followup: '等待该账号的 Case 跟进检查完成',
   waiting_profile_lock: '等待浏览器 profile 释放',
   waiting_serial_queue: '等待其他任务完成（串行队列）',
+  waiting_login: '该账号需要重新登录，同一 profile 的任务已暂停',
 }
+
+const waitingHumanTitle = computed(() => {
+  if (job.value?.raw.error_class === 'reconciliation_completed_resume_requires_confirmation') return '对账已完成，等待继续确认'
+  if (job.value?.raw.error_class === 'waiting_reconciliation') return '提交结果确认中'
+  if (job.value?.raw.error_class === 'waiting_login') return '等待重新登录'
+  if (['manual_review', 'reconciliation_manual_review'].includes(job.value?.raw.error_class ?? '')) return '等待人工核对'
+  return '等待人工处理'
+})
+
+const waitingHumanText = computed(() => {
+  if (job.value?.raw.error_class === 'reconciliation_completed_resume_requires_confirmation') {
+    return 'V-PORYADKU 已按 Selling Applications 的 Approved 结果完成对账；冲突重申已暂停。其余品牌仍暂停，不会自动提交。'
+  }
+  if (job.value?.raw.error_class === 'waiting_reconciliation') {
+    return '提交点击安全边界已记录，系统不会重复提交。登录恢复后只会核对 Selling Applications/Case。'
+  }
+  if (job.value?.raw.error_class === 'waiting_login') {
+    return '任务已在提交前安全暂停。登录恢复后会继续当前站点，不会推进下一站。'
+  }
+  if (['manual_review', 'reconciliation_manual_review'].includes(job.value?.raw.error_class ?? '')) {
+    return '自动核对仍无法得到唯一结论，请根据 Case 和 Selling Applications 证据人工确认。'
+  }
+  return job.value?.stopReason || '任务已安全暂停，请在待人工处理页面查看原因并处理。'
+})
 
 /** 运行模式徽章色：真实提交红、Dry-run 蓝、诊断灰 */
 function modeTagType(m: JobMode): 'error' | 'info' | 'default' {
@@ -150,8 +176,11 @@ function onForceTerminate() {
         >
           状态未知：请先到 Seller Central 的“查看销售申请”/控制面板核查是否已提交，再决定是否重跑，<strong>切勿直接重复提交</strong>。
         </n-alert>
-        <n-alert v-else-if="job.status === 'waiting_human'" type="warning" title="等待人工介入" style="margin-bottom: 16px">
-          {{ job.stopReason }}。处理完成后请前往「待人工处理」页标记继续。
+        <n-alert v-else-if="job.status === 'waiting_human'" type="warning" :title="waitingHumanTitle" style="margin-bottom: 16px">
+          {{ waitingHumanText }}
+          <n-button size="small" tertiary type="warning" style="margin-left: 10px" @click="router.push('/pending')">
+            前往待人工处理
+          </n-button>
         </n-alert>
         <n-alert v-else-if="job.status === 'stop_requested'" type="warning" title="已请求停止" style="margin-bottom: 16px">
           {{ job.stopReason ?? '已请求停止，将在当前品牌完成后安全停下' }}。如需立即终止请联系管理员（强制终止会留下未知状态）。
@@ -188,6 +217,12 @@ function onForceTerminate() {
             </n-descriptions-item>
             <n-descriptions-item v-if="job.raw.exit_code !== null" label="退出码">{{ job.raw.exit_code }}</n-descriptions-item>
             <n-descriptions-item v-if="job.raw.error_class" label="错误分类">{{ job.raw.error_class }}</n-descriptions-item>
+            <n-descriptions-item v-if="jobOptions.case_followup_delay_hours !== undefined" label="Case 首次跟进延迟">
+              {{ jobOptions.case_followup_delay_hours }} 小时（任务级覆盖）
+            </n-descriptions-item>
+            <n-descriptions-item v-if="jobOptions.case_followup_enabled !== undefined" label="创建 Case 跟进">
+              {{ jobOptions.case_followup_enabled ? '是' : '否' }}（任务级覆盖）
+            </n-descriptions-item>
           </n-descriptions>
           <div v-if="job.stopReason && job.status !== 'stop_requested'" class="stop-reason">{{ job.stopReason }}</div>
         </n-card>
@@ -210,6 +245,11 @@ function onForceTerminate() {
                     <span>Case ID：<code>{{ r.caseId ?? '—' }}</code></span>
                     <span class="sep">·</span>
                     <span>控制面板：{{ dashboardStatusLabel(r.dashboardStatus) }}</span>
+                  </div>
+                  <div v-if="r.businessSource" class="brand-source">
+                    业务状态来源：{{ r.businessSource }}
+                    <template v-if="r.businessCheckedAt"> · <RelativeTime :time="r.businessCheckedAt" /></template>
+                    <template v-if="r.businessDetail"> · {{ r.businessDetail }}</template>
                   </div>
                   <div v-if="r.note" class="brand-note">{{ r.note }}</div>
                 </div>
@@ -327,6 +367,12 @@ function onForceTerminate() {
   font-size: 12px;
   color: #f0a020;
   margin-top: 4px;
+}
+
+.brand-source {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #2080f0;
 }
 
 .log-wrap {

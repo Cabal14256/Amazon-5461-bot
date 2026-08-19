@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS case_followups (
   feishu_bound_at TEXT,
   reapplication_campaign_id INTEGER,
   reapplication_attempt_id INTEGER,
+  auth_block_id INTEGER,
   claimed_pid INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -101,6 +102,7 @@ CREATE TABLE IF NOT EXISTS reapplication_campaigns (
   current_route_index INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'scheduled',
   submit_authorized INTEGER NOT NULL DEFAULT 0,
+  authorization_source TEXT NOT NULL DEFAULT 'manual',
   decline_delay_hours REAL NOT NULL DEFAULT 2.0,
   source_case_followup_id INTEGER,
   source_marketplace TEXT,
@@ -137,6 +139,7 @@ CREATE TABLE IF NOT EXISTS reapplication_attempts (
   stdout_path TEXT,
   stderr_path TEXT,
   pid INTEGER,
+  auth_block_id INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(campaign_id, route_index),
@@ -165,6 +168,7 @@ CREATE TABLE IF NOT EXISTS case_id_recoveries (
   feishu_country_option TEXT,
   reapplication_campaign_id INTEGER,
   reapplication_attempt_id INTEGER,
+  auth_block_id INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(account_id, marketplace, brand_name, submitted_at)
@@ -313,12 +317,14 @@ CREATE TABLE IF NOT EXISTS automation_jobs (
   account_id TEXT NOT NULL,
   marketplace TEXT,
   brands_json TEXT NOT NULL,
+  options_json TEXT NOT NULL DEFAULT '{}',
   pid INTEGER,
   exit_code INTEGER,
   error_class TEXT,
   state_file TEXT,
   stdout_log TEXT,
   stderr_log TEXT,
+  auth_block_id INTEGER,
   stop_requested_at TEXT,
   started_at TEXT,
   finished_at TEXT,
@@ -358,6 +364,76 @@ CREATE TABLE IF NOT EXISTS profile_locks (
   heartbeat_at TEXT,
   expires_at TEXT
 );
+
+-- Account-to-profile metadata contains only the irreversible profile hash.
+-- It lets every scheduler pause aliases that share one AdsPower profile
+-- without persisting the raw profile id from private account configuration.
+CREATE TABLE IF NOT EXISTS account_profile_bindings (
+  account_id TEXT PRIMARY KEY,
+  profile_key TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_account_profile_bindings_profile
+ON account_profile_bindings(profile_key);
+
+-- Persistent Seller Central authentication interruptions.  profile_key is
+-- the same irreversible AdsPower identifier used by profile_locks; the raw
+-- AdsPower profile id and account credentials never enter SQLite.
+CREATE TABLE IF NOT EXISTS account_auth_blocks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  profile_key TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  marketplace TEXT,
+  brand_name TEXT,
+  block_type TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  submit_fenced INTEGER NOT NULL DEFAULT 0,
+  evidence_path TEXT,
+  detail TEXT,
+  detected_at TEXT NOT NULL,
+  last_checked_at TEXT,
+  next_check_at TEXT,
+  resolved_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_account_auth_blocks_status
+ON account_auth_blocks(status, next_check_at, detected_at);
+CREATE INDEX IF NOT EXISTS idx_account_auth_blocks_account_status
+ON account_auth_blocks(account_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_auth_blocks_one_open_profile
+ON account_auth_blocks(profile_key) WHERE status='open';
+
+-- Durable submit fence shared by web jobs and finite reapplications.  The
+-- click fence is written before dispatching the browser click.  Once set, a
+-- task may only reconcile Selling Applications/Case and can never auto-click
+-- submit again.
+CREATE TABLE IF NOT EXISTS submission_checkpoints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_type TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  marketplace TEXT NOT NULL,
+  brand_name TEXT NOT NULL,
+  phase TEXT NOT NULL DEFAULT 'started',
+  status TEXT NOT NULL DEFAULT 'active',
+  submit_intent_at TEXT,
+  submit_click_fenced_at TEXT,
+  resumed_at TEXT,
+  auth_block_id INTEGER,
+  case_id TEXT,
+  detail TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(owner_type, owner_id, marketplace, brand_name)
+);
+CREATE INDEX IF NOT EXISTS idx_submission_checkpoints_auth
+ON submission_checkpoints(auth_block_id, status);
+CREATE INDEX IF NOT EXISTS idx_submission_checkpoints_scope
+ON submission_checkpoints(account_id, marketplace, brand_name, updated_at);
 
 -- Stage-5 persisted anomaly detection.  Failures are deduplicated by
 -- (signature, scope_type, account_id, marketplace, brand_name) while the
@@ -603,8 +679,15 @@ def _run_migrations(conn):
     _ensure_column(conn, 'case_followups', 'feishu_bound_at', 'TEXT')
     _ensure_column(conn, 'case_followups', 'reapplication_campaign_id', 'INTEGER')
     _ensure_column(conn, 'case_followups', 'reapplication_attempt_id', 'INTEGER')
+    _ensure_column(conn, 'case_followups', 'auth_block_id', 'INTEGER')
     _ensure_column(conn, 'reapplication_campaigns', 'source_case_followup_id', 'INTEGER')
     _ensure_column(conn, 'reapplication_campaigns', 'source_marketplace', 'TEXT')
+    _ensure_column(
+        conn,
+        'reapplication_campaigns',
+        'authorization_source',
+        "TEXT NOT NULL DEFAULT 'manual'",
+    )
     # Count Codex reply-classification attempts separately from browser Case
     # checks. A Case may have been polled several times before Amazon replies;
     # those earlier checks must not consume the bounded AI retry allowance.
@@ -612,6 +695,11 @@ def _run_migrations(conn):
     # Worker PID that claimed the task; lets crash recovery requeue stale
     # 'running' rows as soon as the claimant is verifiably dead.
     _ensure_column(conn, 'case_followups', 'claimed_pid', 'INTEGER')
+    _ensure_column(conn, 'case_id_recoveries', 'auth_block_id', 'INTEGER')
+    _ensure_column(conn, 'reapplication_attempts', 'auth_block_id', 'INTEGER')
+    _ensure_column(conn, 'automation_jobs', 'auth_block_id', 'INTEGER')
+    _ensure_column(conn, 'automation_jobs', 'options_json', "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(conn, 'submission_checkpoints', 'resumed_at', 'TEXT')
     # SQLite does not alter partial-index predicates in place. Recreate this
     # local-only index so waiting_case_id remains an active campaign state.
     conn.execute('DROP INDEX IF EXISTS idx_reapplication_campaigns_one_active')
@@ -935,7 +1023,14 @@ def claim_due_case_followups(
     conn = get_conn(db_path)
     conn.execute("BEGIN IMMEDIATE")
     sql = """SELECT * FROM case_followups
-             WHERE status IN ('pending', 'retry') AND scheduled_at <= ?"""
+             WHERE status IN ('pending', 'retry') AND scheduled_at <= ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM account_auth_blocks b
+                 LEFT JOIN account_profile_bindings p ON p.profile_key=b.profile_key
+                 WHERE b.status='open'
+                   AND (b.account_id=case_followups.account_id
+                        OR p.account_id=case_followups.account_id)
+               )"""
     params: list[Any] = [due_at]
     if reapplication_only:
         sql += " AND reapplication_campaign_id IS NOT NULL"
@@ -957,6 +1052,13 @@ def claim_due_case_followups(
             group_sql = """SELECT * FROM case_followups
                            WHERE status IN ('pending', 'retry')
                              AND scheduled_at <= ?
+                             AND NOT EXISTS (
+                               SELECT 1 FROM account_auth_blocks b
+                               LEFT JOIN account_profile_bindings p ON p.profile_key=b.profile_key
+                               WHERE b.status='open'
+                                 AND (b.account_id=case_followups.account_id
+                                      OR p.account_id=case_followups.account_id)
+                             )
                              AND account_id=? AND marketplace=?"""
             group_params: list[Any] = [
                 due_at,
@@ -1007,7 +1109,14 @@ def list_due_case_followup_groups(
     sql = """SELECT account_id, marketplace, MIN(scheduled_at) AS oldest_due,
                     COUNT(*) AS task_count
              FROM case_followups
-             WHERE status IN ('pending', 'retry') AND scheduled_at <= ?"""
+             WHERE status IN ('pending', 'retry') AND scheduled_at <= ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM account_auth_blocks b
+                 LEFT JOIN account_profile_bindings p ON p.profile_key=b.profile_key
+                 WHERE b.status='open'
+                   AND (b.account_id=case_followups.account_id
+                        OR p.account_id=case_followups.account_id)
+               )"""
     params: list[Any] = [due_at]
     if reapplication_only:
         sql += " AND reapplication_campaign_id IS NOT NULL"
@@ -1180,7 +1289,14 @@ def get_next_case_followup_due(
     selected_ids = [int(value) for value in (followup_ids or [])]
     conn = get_conn(db_path)
     sql = """SELECT MIN(scheduled_at) AS scheduled_at FROM case_followups
-             WHERE status IN ('pending', 'retry')"""
+             WHERE status IN ('pending', 'retry')
+               AND NOT EXISTS (
+                 SELECT 1 FROM account_auth_blocks b
+                 LEFT JOIN account_profile_bindings p ON p.profile_key=b.profile_key
+                 WHERE b.status='open'
+                   AND (b.account_id=case_followups.account_id
+                        OR p.account_id=case_followups.account_id)
+               )"""
     params: list[Any] = []
     if reapplication_only:
         sql += " AND reapplication_campaign_id IS NOT NULL"
@@ -1815,6 +1931,13 @@ def _automation_job_row_to_dict(row) -> dict[str, Any]:
         data["brands"] = json.loads(data.pop("brands_json") or "[]")
     except json.JSONDecodeError:
         data["brands"] = []
+    try:
+        options = json.loads(data.pop("options_json", "{}") or "{}")
+        from src.jobs.options import normalize_job_options
+
+        data["options"] = normalize_job_options(options, job_type=str(data.get("job_type") or ""))
+    except (json.JSONDecodeError, ValueError):
+        data["options"] = {}
     return data
 
 
@@ -1827,9 +1950,13 @@ def create_automation_job(
     marketplace: str | None,
     brands: list[str],
     run_status: str = "queued",
+    options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from src.jobs.options import normalize_job_options
+
     if job_type not in AUTOMATION_JOB_TYPES:
         raise ValueError(f"非法任务类型: {job_type}")
+    normalized_options = normalize_job_options(options or {}, job_type=job_type)
     # New jobs are born queued; waiting_human remains available for flows
     # that genuinely pause for human action (CAPTCHA / 2FA / login loss).
     if run_status not in {"queued", "waiting_human"}:
@@ -1839,8 +1966,8 @@ def create_automation_job(
     conn.execute(
         """INSERT INTO automation_jobs(
                id, job_type, run_status, created_by, account_id, marketplace,
-               brands_json, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               brands_json, options_json, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             job_id,
             job_type,
@@ -1849,6 +1976,7 @@ def create_automation_job(
             account_id,
             marketplace,
             json.dumps(list(brands), ensure_ascii=False),
+            json.dumps(normalized_options, ensure_ascii=False, sort_keys=True),
             now,
             now,
         ),
@@ -1901,8 +2029,15 @@ def claim_next_queued_automation_job(db_path: str) -> dict[str, Any] | None:
     conn = get_conn(db_path)
     conn.execute("BEGIN IMMEDIATE")
     row = conn.execute(
-        """SELECT id FROM automation_jobs
-           WHERE run_status='queued' ORDER BY created_at, id LIMIT 1"""
+        """SELECT j.id FROM automation_jobs j
+           WHERE j.run_status='queued'
+             AND NOT EXISTS (
+               SELECT 1 FROM account_auth_blocks b
+               LEFT JOIN account_profile_bindings p ON p.profile_key=b.profile_key
+               WHERE b.status='open'
+                 AND (b.account_id=j.account_id OR p.account_id=j.account_id)
+             )
+           ORDER BY j.created_at, j.id LIMIT 1"""
     ).fetchone()
     claimed = None
     if row:
@@ -2085,6 +2220,34 @@ def _lock_time_str(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _profile_lock_owner_pid(conn, row) -> int | None:
+    """Return the persisted/encoded owner PID for process-backed lock types."""
+
+    owner_type = str(row["owner_type"] or "")
+    if owner_type == "automation_job":
+        job = conn.execute(
+            "SELECT pid FROM automation_jobs WHERE id=?", (row["owner_id"],)
+        ).fetchone()
+        return int(job["pid"]) if job and job["pid"] is not None else None
+    if owner_type in {
+        "case_followup_worker",
+        "case_id_recovery_worker",
+        "reapplication_worker",
+    }:
+        parts = str(row["owner_id"] or "").split(":")
+        return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+    return None
+
+
+def _profile_lock_has_process_owner(row) -> bool:
+    return str(row["owner_type"] or "") in {
+        "automation_job",
+        "case_followup_worker",
+        "case_id_recovery_worker",
+        "reapplication_worker",
+    }
+
+
 def acquire_profile_lock(
     db_path: str,
     profile_key: str,
@@ -2096,8 +2259,10 @@ def acquire_profile_lock(
 ) -> bool:
     """Take the profile lock in one transaction.
 
-    An expired lock is reclaimed only after verifying its owner PID is gone
-    (``pid_alive`` callable; defaults to "no PID known -> reclaimable").
+    An expired lock is reclaimed only after verifying its owner PID is gone.
+    A process-backed lock whose PID is verifiably dead is reclaimed early so
+    a crashed worker cannot block the profile for the remainder of a long TTL.
+    ``pid_alive`` defaults to "no PID known -> reclaim expired locks only".
     """
     now = now or datetime.now()
     now_text = _lock_time_str(now)
@@ -2116,19 +2281,16 @@ def acquire_profile_lock(
             (profile_key, owner_type, owner_id, now_text, now_text, expires_text),
         )
         acquired = True
-    elif str(existing["expires_at"] or "") <= now_text:
-        owner_alive = False
-        if existing["owner_type"] == "automation_job":
-            job = conn.execute(
-                "SELECT pid FROM automation_jobs WHERE id=?", (existing["owner_id"],)
-            ).fetchone()
-            pid = job["pid"] if job else None
-            owner_alive = bool(pid_alive(pid)) if pid_alive else False
-        elif existing["owner_type"] == "case_followup_worker":
-            parts = str(existing["owner_id"] or "").split(":")
-            pid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
-            owner_alive = bool(pid_alive(pid)) if pid_alive else False
-        if not owner_alive:
+    else:
+        expired = str(existing["expires_at"] or "") <= now_text
+        owner_pid = _profile_lock_owner_pid(conn, existing)
+        owner_alive = (
+            bool(pid_alive(owner_pid))
+            if pid_alive is not None and _profile_lock_has_process_owner(existing)
+            else None
+        )
+        early_dead_process = owner_pid is not None and owner_alive is False
+        if (expired and owner_alive is not True) or early_dead_process:
             conn.execute(
                 """UPDATE profile_locks
                    SET owner_type=?, owner_id=?, acquired_at=?, heartbeat_at=?, expires_at=?
@@ -2203,15 +2365,8 @@ def reap_stale_profile_locks(db_path: str, pid_alive, now: datetime | None = Non
     reaped = 0
     for row in rows:
         owner_alive = False
-        if row["owner_type"] == "automation_job":
-            job = conn.execute(
-                "SELECT pid FROM automation_jobs WHERE id=?", (row["owner_id"],)
-            ).fetchone()
-            pid = job["pid"] if job else None
-            owner_alive = bool(pid_alive(pid))
-        elif row["owner_type"] == "case_followup_worker":
-            parts = str(row["owner_id"] or "").split(":")
-            pid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+        pid = _profile_lock_owner_pid(conn, row)
+        if _profile_lock_has_process_owner(row):
             owner_alive = bool(pid_alive(pid))
         if not owner_alive:
             conn.execute(

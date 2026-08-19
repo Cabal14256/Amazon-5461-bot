@@ -17,6 +17,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.auth_recovery import process_due_auth_blocks  # noqa: E402
 from src.case_followup import (  # noqa: E402
     get_case_followup_config,
     process_due_case_followups,
@@ -31,6 +32,7 @@ from src.db import (  # noqa: E402
     requeue_stale_case_followups,
 )
 from src.jobs.profile_locks import profile_key_for_account  # noqa: E402
+from src.reapplication import auto_schedule_declined_cases  # noqa: E402
 
 
 def _pid_running(pid: int) -> bool:
@@ -133,6 +135,14 @@ def main(argv: list[str] | None = None) -> int:
     if requeued:
         print(f"[CaseFollowup] 已恢复 {requeued} 个中断任务")
 
+    if not followup_ids and not args.reapplication_only:
+        auto_reapplications = auto_schedule_declined_cases(settings)
+        if auto_reapplications.get("created") or auto_reapplications.get("errors"):
+            print(
+                "[CaseFollowup] 历史明确拒绝自动补扫: "
+                + json.dumps(auto_reapplications, ensure_ascii=False)
+            )
+
     watch = bool(args.watch)
     poll_seconds = max(5, min(60, int(config.get("poll_interval_seconds") or 60)))
     group_limit = max(1, int(args.limit or config.get("claim_group_limit") or 20))
@@ -181,6 +191,13 @@ def main(argv: list[str] | None = None) -> int:
             release_profile_lock(db_path, profile_key, owner_id=owner_id)
 
     while True:
+        if not followup_ids and not args.reapplication_only:
+            auth_results = process_due_auth_blocks(settings)
+            if auth_results:
+                print(
+                    "[AuthRecovery] 登录状态被动检查: "
+                    + json.dumps(auth_results, ensure_ascii=False)
+                )
         groups = list_due_case_followup_groups(
             db_path,
             followup_ids=followup_ids or None,

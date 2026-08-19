@@ -5,6 +5,7 @@ This allows the StateLoopExecutor to invoke legacy logic without hard-coding
 function names, and returns a consistent {ok, result, error} shape.
 """
 
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -38,10 +39,10 @@ class LegacyBridge:
 
         # Lazy imports to avoid heavy module load
         from ..flow_submit_5461 import (
-            fill_5461_form,
             connect_brand_in_5461_panel,
-            handle_declined_case_application,
             extract_case_id,
+            fill_5461_form,
+            handle_declined_case_application,
         )
         from ..form_filler import KatalFormFiller
 
@@ -75,6 +76,24 @@ class LegacyBridge:
             ok = self._result_ok(action_name, result)
             return {"ok": ok, "result": result, "error": "" if ok else self._result_error(action_name, result)}
         except Exception as e:
+            from ..auth_guard import AuthBlockedError
+            from ..auth_recovery import SubmissionReconciliationRequired
+
+            if isinstance(e, SubmissionReconciliationRequired):
+                return {
+                    "ok": False,
+                    "result": None,
+                    "error": "waiting_reconciliation",
+                    "stop": True,
+                }
+            if isinstance(e, AuthBlockedError):
+                return {
+                    "ok": False,
+                    "result": None,
+                    "error": "waiting_reconciliation" if e.submit_fenced else "waiting_login",
+                    "auth_block_id": e.block_id,
+                    "stop": True,
+                }
             print(f"[NG] LegacyBridge.{method_name} error: {e}")
             return {"ok": False, "result": None, "error": str(e)}
 
@@ -221,12 +240,104 @@ class LegacyBridge:
             self.page, brand_name, statement_text, upload_files, email
         )
 
-        # Click submit
+        # Persist the submit fence before dispatching the click.  The state
+        # loop must obey the same no-reclick contract as the main flow.
+        from ..auth_guard import AuthBlockedError, ensure_not_auth_blocked
+        from ..auth_recovery import (
+            SubmissionReconciliationRequired,
+            capture_auth_evidence,
+            create_auth_block,
+            ensure_submission_checkpoint,
+            mark_submit_click_fenced,
+            mark_submit_intent,
+        )
         from ..flow_submit_5461 import click_katal_button
+
+        db_path = str(
+            self.brand_data.get("checkpoint_db_path")
+            or os.getenv("AMAZON5461_DB_PATH")
+            or Path(__file__).resolve().parents[2] / "runtime" / "state" / "ledger.db"
+        )
+        owner_type = str(self.brand_data.get("submission_owner_type") or "direct_run")
+        owner_id = str(
+            self.brand_data.get("submission_owner_id")
+            or os.getenv("AMAZON5461_RUN_ID")
+            or f"state-loop:{self.brand_data.get('account_id')}:{brand_name}"
+        )
+        checkpoint = ensure_submission_checkpoint(
+            db_path,
+            owner_type=owner_type,
+            owner_id=owner_id,
+            account_id=str(self.brand_data.get("account_id") or ""),
+            marketplace=str(self.brand_data.get("marketplace") or ""),
+            brand_name=brand_name,
+            phase="state_loop_form",
+        )
+        if checkpoint.get("submit_click_fenced_at"):
+            raise SubmissionReconciliationRequired(checkpoint)
+        checkpoint = mark_submit_intent(db_path, int(checkpoint["id"]), phase="state_loop_form")
+        try:
+            ensure_not_auth_blocked(self.page, phase="state_loop_before_submit")
+        except AuthBlockedError as exc:
+            auth_settings = {
+                "paths": {"db_path": db_path, "evidence_root": str(self.evidence_dir)},
+                "auth_recovery": {"poll_interval_seconds": 300},
+            }
+            evidence_path = capture_auth_evidence(
+                self.page,
+                auth_settings,
+                account_id=str(self.brand_data.get("account_id") or ""),
+                phase=exc.phase,
+            )
+            auth_block = create_auth_block(
+                auth_settings,
+                account_id=str(self.brand_data.get("account_id") or ""),
+                marketplace=str(self.brand_data.get("marketplace") or ""),
+                brand_name=brand_name,
+                block_type=exc.auth_state.state,
+                phase=exc.phase,
+                source_type=owner_type,
+                source_id=owner_id,
+                evidence_path=evidence_path,
+                checkpoint_id=int(checkpoint["id"]),
+            )
+            exc.block_id = int(auth_block["id"])
+            exc.submit_fenced = False
+            raise
+        checkpoint = mark_submit_click_fenced(db_path, int(checkpoint["id"]), phase="state_loop_form")
         submit_ok = click_katal_button(self.page, 'kat-button#submit_button')
 
         # Wait for case ID to appear
         time.sleep(12)
+        try:
+            ensure_not_auth_blocked(self.page, phase="state_loop_post_submit")
+        except AuthBlockedError as exc:
+            auth_settings = {
+                "paths": {"db_path": db_path, "evidence_root": str(self.evidence_dir)},
+                "auth_recovery": {"poll_interval_seconds": 300},
+            }
+            evidence_path = capture_auth_evidence(
+                self.page,
+                auth_settings,
+                account_id=str(self.brand_data.get("account_id") or ""),
+                phase=exc.phase,
+            )
+            auth_block = create_auth_block(
+                auth_settings,
+                account_id=str(self.brand_data.get("account_id") or ""),
+                marketplace=str(self.brand_data.get("marketplace") or ""),
+                brand_name=brand_name,
+                block_type=exc.auth_state.state,
+                phase=exc.phase,
+                source_type=owner_type,
+                source_id=owner_id,
+                submit_fenced=True,
+                evidence_path=evidence_path,
+                checkpoint_id=int(checkpoint["id"]),
+            )
+            exc.block_id = int(auth_block["id"])
+            exc.submit_fenced = True
+            raise
         case_id = self._extract_case_id_fn(self.page)
 
         return {

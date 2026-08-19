@@ -22,12 +22,14 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
+from src.auth_recovery import account_has_open_auth_block
 from src.capture.redact import redact_text
 from src.db import (
     AUTOMATION_JOB_TERMINAL_STATUSES,
     account_has_active_case_followup,
     create_automation_job,
     get_automation_job,
+    get_conn,
     get_profile_lock,
     list_active_automation_jobs,
     list_automation_job_items,
@@ -35,6 +37,7 @@ from src.db import (
     record_web_audit,
 )
 from src.jobs import profile_locks
+from src.jobs.options import NON_SUBMIT_BRAND_LIMIT, normalize_job_options
 from src.jobs.paths import job_paths
 from src.state_files import read_json_tolerant
 from src.web.deps import get_settings, require_role
@@ -43,10 +46,10 @@ from src.web.schemas import (
     AutomationJobOut,
     JobCreateRequest,
 )
+from src.web.services.read_model import resolve_brand_status
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
-MAX_BRANDS_PER_JOB = 20
 MAX_SSE_LOG_LINES = 200
 
 
@@ -76,7 +79,7 @@ def _validate_job_request(settings, body: JobCreateRequest) -> tuple[dict, list[
     brands = [b.strip() for b in body.brands if b and b.strip()]
     if not brands:
         raise HTTPException(status_code=422, detail="no_brands")
-    if len(brands) > MAX_BRANDS_PER_JOB:
+    if len(brands) > NON_SUBMIT_BRAND_LIMIT:
         raise HTTPException(status_code=422, detail="too_many_brands")
     root = settings.brand_packs_root
     for brand in brands:
@@ -97,6 +100,7 @@ def _create_job(request: Request, user: dict, body: JobCreateRequest, job_type: 
     ip = _client_ip(request)
     try:
         _account, brands, site = _validate_job_request(settings, body)
+        options = _validate_job_options(body, job_type)
     except HTTPException as exc:
         record_web_audit(
             db_path, action="job_create", actor_id=int(user["id"]),
@@ -104,6 +108,14 @@ def _create_job(request: Request, user: dict, body: JobCreateRequest, job_type: 
             result=f"rejected:{exc.detail}", ip_address=ip,
         )
         raise
+    except ValueError as exc:
+        reason = str(exc)
+        record_web_audit(
+            db_path, action="job_create", actor_id=int(user["id"]),
+            target_type="automation_job", target_id=f"{job_type}:{body.account}",
+            result=f"rejected:{reason}", ip_address=ip,
+        )
+        raise HTTPException(status_code=422, detail=reason) from exc
 
     job_id = f"job-{datetime.now():%Y%m%d}-{secrets.token_hex(4)}"
     job = create_automation_job(
@@ -114,6 +126,7 @@ def _create_job(request: Request, user: dict, body: JobCreateRequest, job_type: 
         account_id=body.account.strip(),
         marketplace=site,
         brands=brands,
+        options=options,
     )
     record_web_audit(
         db_path, action="job_create", actor_id=int(user["id"]),
@@ -121,6 +134,11 @@ def _create_job(request: Request, user: dict, body: JobCreateRequest, job_type: 
         result="ok", ip_address=ip,
     )
     return {"job": AutomationJobOut(**job)}
+
+
+def _validate_job_options(body: JobCreateRequest, job_type: str) -> dict[str, Any]:
+    raw = body.options.model_dump(exclude_none=True) if body.options else {}
+    return normalize_job_options(raw, job_type=job_type)
 
 
 @router.post("/diagnose")
@@ -194,6 +212,8 @@ def _queue_reason(settings, job: dict) -> str | None:
     if job.get("run_status") != "queued":
         return None
     db_path = str(settings.db_path)
+    if account_has_open_auth_block(db_path, str(job["account_id"])):
+        return "waiting_login"
     if account_has_active_case_followup(db_path, str(job["account_id"])):
         return "waiting_case_followup"
     profile_key = profile_locks.profile_key_for_account(
@@ -206,8 +226,37 @@ def _queue_reason(settings, job: dict) -> str | None:
     return None
 
 
+def _effective_waiting_error_class(settings, job: dict) -> str | None:
+    """Correct stale umbrella reasons without mutating historical job rows."""
+
+    existing = str(job.get("error_class") or "").strip() or None
+    if job.get("run_status") != "waiting_human":
+        return existing
+
+    conn = get_conn(str(settings.db_path))
+    checkpoints = conn.execute(
+        """SELECT status FROM submission_checkpoints
+           WHERE owner_type='automation_job' AND owner_id=?
+           ORDER BY datetime(updated_at) DESC, id DESC""",
+        (str(job["id"]),),
+    ).fetchall()
+    conn.close()
+    statuses = {str(row["status"] or "") for row in checkpoints}
+    if "waiting_reconciliation" in statuses:
+        return "waiting_reconciliation"
+    if account_has_open_auth_block(str(settings.db_path), str(job["account_id"])):
+        return "waiting_login"
+    if "manual_review" in statuses:
+        return "manual_review"
+    if existing in {"waiting_reconciliation", "waiting_login", "manual_review"}:
+        return existing
+    return existing or "waiting_human"
+
+
 def _job_out(settings, job: dict) -> AutomationJobOut:
-    return AutomationJobOut(**job, queue_reason=_queue_reason(settings, job))
+    payload = dict(job)
+    payload["error_class"] = _effective_waiting_error_class(settings, job)
+    return AutomationJobOut(**payload, queue_reason=_queue_reason(settings, payload))
 
 
 @router.get("")
@@ -248,9 +297,24 @@ def get_job(job_id: str, request: Request):
     settings = get_settings(request)
     job = _get_job_or_404(settings, job_id)
     items = list_automation_job_items(str(settings.db_path), job_id)
+    enriched_items = []
+    for item in items:
+        authoritative = None
+        account_id = str(item.get("account_id") or job.get("account_id") or "")
+        marketplace = str(item.get("marketplace") or job.get("marketplace") or "")
+        brand_name = str(item.get("brand_name") or "")
+        if account_id and marketplace and brand_name:
+            authoritative = resolve_brand_status(
+                str(settings.db_path),
+                account_id,
+                marketplace,
+                brand_name,
+                data_root=settings.data_root,
+            )
+        enriched_items.append(AutomationJobItemOut(**item, authoritative=authoritative))
     return {
         "job": _job_out(settings, job),
-        "items": [AutomationJobItemOut(**item) for item in items],
+        "items": enriched_items,
     }
 
 

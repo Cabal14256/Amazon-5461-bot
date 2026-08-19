@@ -56,6 +56,7 @@ def test_reapplication_requires_reviewer_and_is_idempotent(client, web_settings,
     payload = first.json()
     assert payload["created"] is True
     assert payload["reapplication"]["source_case_followup_id"] == followup_id
+    assert payload["reapplication"]["authorization_source"] == "manual_case"
     assert [attempt["site"] for attempt in payload["reapplication"]["attempts"]] == ["UK", "BE"]
 
     second_body = dict(body, confirmed_remaining_route=["XX"])
@@ -86,6 +87,12 @@ def test_eligible_declines_excludes_last_route(client, web_settings):
     response = client.get("/api/reapplications/eligible-declines")
     assert response.status_code == 200
     assert [item["id"] for item in response.json()["eligible_declines"]] == [eligible_id]
+
+    automation = client.get("/api/reapplications/automation-status")
+    assert automation.status_code == 200
+    assert isinstance(automation.json()["auto_authorize_declined_cases"], bool)
+    assert automation.json()["auto_backfill_min_followup_id"] >= 0
+    assert automation.json()["routes"]["EU"] == ["UK", "BE", "DE", "SE", "NL", "FR"]
 
 
 def test_first_reapplication_preflight_blocker_creates_nothing(

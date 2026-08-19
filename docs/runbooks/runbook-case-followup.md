@@ -84,9 +84,16 @@ Test a binding without submitting or changing Feishu:
   continue listing.` is decisive approval even if the portfolio or Add Product
   check produced a conflicting result. An explicit Connect brand failure is
   `false_approved` / Excel `假过`.
+- A brand-specific `Listing approval for <exact brand>` panel that asks to
+  `Submit required information` / `Apply to sell` is an explicit Connect brand
+  failure, not an unknown result.
 - A missing selector, search timeout, or ambiguous same-brand/category result in
   the Connect brand fallback becomes retryable `verification_pending`, not
   `假过`.
+- An explicit Add Product authorization restriction such as `application
+  required` remains `false_approved` even when the stale portfolio leaves the
+  Connect brand result technically unknown. A disabled button without an
+  explicit restriction marker remains conservative and retryable.
 - When the brand is already present in the portfolio, Add Product explicitly
   remaining restricted/cannot advance after required fields are filled is
   `false_approved` / Excel `假过`.
@@ -125,6 +132,13 @@ Test a binding without submitting or changing Feishu:
   `false_approved`, `Answered`, pending, unknown, or technical state is never
   skipped by this rule.
 - Login, CAPTCHA, and 2FA become `blocked`; the worker does not bypass them.
+- Browser, AdsPower, network, and worker failures are local Case-follow-up
+  technical errors, not Amazon replies. The read model exposes them with
+  source `case_followup_error`, so the console keeps "Case 最新回复" empty and
+  shows the diagnostic under "Case 跟进技术异常" instead.
+- An AdsPower restart tolerates one inconclusive stop response and retries one
+  failed start after the configured hand-off delay. The retry is bounded; a
+  persistent failure returns to the normal Case retry/circuit-breaker path.
 
 ## Commands
 

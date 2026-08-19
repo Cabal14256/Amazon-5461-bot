@@ -4,8 +4,9 @@
 逻辑：
 1. 通过 AdsPower 本地 API 扫描全部环境；
 2. 从环境 名称/备注 中提取账号编号（3 位以上数字）；
-3. 与 accounts.json 对比（按 account_id 与已绑定 profile_id 双重判重），找出未登记的环境；
-4. --apply 时调用 auto_add_account_data.ensure_account_exists() 登记：
+3. 与 accounts.json 对比（按 account_id 与已绑定 profile_id 双重判重），找出未登记环境，
+   以及可唯一补齐 profile 的 pending_setup 账号；
+4. --apply 时登记新账号或补齐已有 pending_setup 账号：
    默认 marketplace=US，marketplace_configs 自动包含全部站点（US/MX/UK/BE/NL/SE/DE/FR/ES/IT，
    即默认覆盖 US + EU），status 按 profile 匹配结果置为 active/pending_setup。
 
@@ -58,14 +59,21 @@ def extract_numbers(profile: dict[str, Any]) -> list[str]:
 
 
 def discover_new_accounts(profiles: list[dict[str, Any]]) -> dict[str, Any]:
-    """对比 accounts.json，把 profile 分成 enrolled/exists/ambiguous/no_number 四类。"""
+    """Classify profiles, including safe refreshes for existing pending accounts."""
     payload = aad.load_accounts_payload()
     accounts = payload.get("accounts", [])
-    known_ids = {str(a.get("account_id") or "") for a in accounts}
+    known_accounts = {
+        str(a.get("account_id") or ""): a
+        for a in accounts
+        if str(a.get("account_id") or "")
+    }
+    known_ids = set(known_accounts)
     bound_pids = {str(a.get("adspower_profile_id") or "") for a in accounts} - {""}
 
     by_num: dict[str, list[dict[str, Any]]] = {}
+    refresh_by_num: dict[str, list[dict[str, Any]]] = {}
     exists: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
     no_number: list[str] = []
 
     for profile in profiles:
@@ -84,12 +92,17 @@ def discover_new_accounts(profiles: list[dict[str, Any]]) -> dict[str, Any]:
         num = nums[0]
         account_id = aad.normalize_account_id(num)
         if account_id in known_ids:
-            exists.append({"profile": label, "account_id": account_id, "reason": "account_id 已存在"})
+            account = known_accounts[account_id]
+            if str(account.get("adspower_profile_id") or "").strip():
+                exists.append({"profile": label, "account_id": account_id, "reason": "account_id 已存在"})
+            elif not pid:
+                ambiguous.append({"account_num": num, "reason": "匹配环境缺少 profile_id"})
+            else:
+                refresh_by_num.setdefault(num, []).append(profile)
             continue
         by_num.setdefault(num, []).append(profile)
 
     new_accounts: list[dict[str, Any]] = []
-    ambiguous: list[dict[str, Any]] = []
     for num, group in sorted(by_num.items()):
         if num == "__multi__":
             for p in group:
@@ -109,10 +122,27 @@ def discover_new_accounts(profiles: list[dict[str, Any]]) -> dict[str, Any]:
             "profile_id": profile_id_of(group[0]),
         })
 
+    refresh_accounts: list[dict[str, Any]] = []
+    for num, group in sorted(refresh_by_num.items()):
+        if len(group) > 1:
+            ambiguous.append({
+                "account_num": num,
+                "reason": f"已有未绑定账号对应 {len(group)} 个环境",
+                "profiles": [profile_label(p) for p in group],
+            })
+            continue
+        refresh_accounts.append({
+            "account_num": num,
+            "account_id": aad.normalize_account_id(num),
+            "profile": profile_label(group[0]),
+            "profile_id": profile_id_of(group[0]),
+        })
+
     return {
         "profiles_scanned": len(profiles),
         "accounts_registered": len(accounts),
         "new": new_accounts,
+        "refresh": refresh_accounts,
         "exists": exists,
         "ambiguous": ambiguous,
         "no_number": no_number,
@@ -143,10 +173,10 @@ def main() -> int:
 
     report = discover_new_accounts(profiles)
 
-    if args.apply and report["new"]:
+    if args.apply and (report["new"] or report["refresh"]):
         backup = backup_accounts()
         report["backup"] = str(backup) if backup else None
-        enrolled, failed = [], []
+        enrolled, refreshed, failed = [], [], []
         for item in report["new"]:
             try:
                 meta = aad.ensure_account_exists(item["account_num"], auto_create=True, site=None)
@@ -159,10 +189,26 @@ def main() -> int:
                 })
             except Exception as exc:  # 单个失败不阻断其余登记
                 failed.append({"account_id": item["account_id"], "error": str(exc)})
+        profiles_by_id = {profile_id_of(profile): profile for profile in profiles}
+        for item in report["refresh"]:
+            try:
+                meta = aad.refresh_existing_account_from_profile(
+                    item["account_id"], profiles_by_id[item["profile_id"]]
+                )
+                acc = meta["account"]
+                refreshed.append({
+                    "account_id": acc.get("account_id"),
+                    "marketplace": acc.get("marketplace"),
+                    "status": acc.get("status"),
+                })
+            except Exception as exc:
+                failed.append({"account_id": item["account_id"], "error": str(exc)})
         report["enrolled"] = enrolled
+        report["refreshed"] = refreshed
         report["failed"] = failed
     elif args.apply:
         report["enrolled"] = []
+        report["refreshed"] = []
         report["failed"] = []
 
     report["mode"] = "apply" if args.apply else "dry-run"
@@ -178,6 +224,8 @@ def main() -> int:
         for item in report.get("enrolled", []):
             print(f"    ✓ {item['account_id']}  marketplace={item['marketplace']} status={item['status']}"
                   f"{' (matched AdsPower profile)' if item['matched_profile'] else ''}")
+        for item in report.get("refreshed", []):
+            print(f"    ✓ 已补齐 {item['account_id']}  marketplace={item['marketplace']} status={item['status']}")
         for item in report.get("failed", []):
             print(f"    ✗ {item['account_id']}  登记失败: {item['error']}")
         if report["ambiguous"]:

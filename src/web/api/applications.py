@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Request
 
 from src.web.deps import get_settings
@@ -33,4 +35,17 @@ def get_applications(
         date_to=date_to,
         limit=limit,
     )
+    evidence_root = Path(settings.evidence_root).resolve()
+    for item in items:
+        automation = item.get("automation")
+        if not isinstance(automation, dict) or not automation.get("evidence_path"):
+            continue
+        try:
+            automation["evidence_path"] = (
+                Path(str(automation["evidence_path"])).resolve()
+                .relative_to(evidence_root)
+                .as_posix()
+            )
+        except (OSError, ValueError):
+            automation["evidence_path"] = None
     return {"applications": items, "total": len(items)}

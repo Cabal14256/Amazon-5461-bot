@@ -26,6 +26,7 @@ export const useJobsStore = defineStore('jobs', () => {
   const streamMode = ref<'sse' | 'polling' | 'mock' | null>(null)
 
   let streamTimer: ReturnType<typeof setInterval> | null = null
+  let detailTimer: ReturnType<typeof setInterval> | null = null
   let subscription: { close: () => void } | null = null
   let openedId: string | null = null
 
@@ -114,13 +115,23 @@ export const useJobsStore = defineStore('jobs', () => {
       return
     }
 
-    if (!TERMINAL.includes(currentJob.value.status)) startSse(id)
+    if (!TERMINAL.includes(currentJob.value.status)) {
+      // SSE carries the job row and logs, but authoritative per-brand state
+      // can change later through Case/Dashboard workers. Refresh the detail
+      // independently so those outcomes become visible without reloading.
+      detailTimer = setInterval(() => void refreshCurrentDetail(), 5_000)
+      startSse(id)
+    }
   }
 
   function stopLogStream() {
     if (streamTimer !== null) {
       clearInterval(streamTimer)
       streamTimer = null
+    }
+    if (detailTimer !== null) {
+      clearInterval(detailTimer)
+      detailTimer = null
     }
     if (subscription !== null) {
       subscription.close()

@@ -19,6 +19,7 @@ from typing import Any
 
 from .config_loader import load_yaml
 from .db import get_conn, init_db, now_str
+from .state_files import atomic_write_json, read_json_tolerant
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ROUTES = {
@@ -29,6 +30,9 @@ ADVANCE_RESULTS = {"declined"}
 PASS_RESULTS = {"approved"}
 WAIT_RESULTS = {"false_approved", "pending", "verification_pending"}
 PAUSE_RESULTS = {"action_required", "answered_unknown", "blocked"}
+CONFIRMED_DRAFT_REASON = (
+    "Selling Applications 已确认 Draft；等待明确授权后继续当前申请（不会重复新建）"
+)
 ACTIVE_CAMPAIGN_STATUSES = {
     "scheduled",
     "next_scheduled",
@@ -87,6 +91,18 @@ def get_reapplication_config(settings: Mapping[str, Any] | None = None) -> dict[
             routes[str(region).strip().upper()] = normalized
     return {
         "enabled": bool(configured.get("enabled", True)),
+        "auto_authorize_declined_cases": bool(
+            configured.get("auto_authorize_declined_cases", False)
+        ),
+        "auto_backfill_declined_cases": bool(
+            configured.get("auto_backfill_declined_cases", False)
+        ),
+        "auto_backfill_limit": max(
+            1, min(500, int(configured.get("auto_backfill_limit", 100)))
+        ),
+        "auto_backfill_min_followup_id": max(
+            0, int(configured.get("auto_backfill_min_followup_id", 0))
+        ),
         "decline_delay_hours": max(0.0, float(configured.get("decline_delay_hours", 2.0))),
         "poll_interval_seconds": max(5, min(60, int(configured.get("poll_interval_seconds", 60)))),
         "busy_retry_minutes": max(1, int(configured.get("busy_retry_minutes", 10))),
@@ -112,6 +128,7 @@ def create_campaign(
     submit_authorized: bool,
     start_site: str | None = None,
     scheduled_at: str | None = None,
+    authorization_source: str = "manual_cli",
 ) -> dict[str, Any]:
     """Create one finite campaign and its first scheduled attempt."""
 
@@ -159,9 +176,9 @@ def create_campaign(
     cur = conn.execute(
         """INSERT INTO reapplication_campaigns(
                account_id, brand_name, region, route_json, current_route_index,
-               status, submit_authorized, decline_delay_hours,
-               created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?)""",
+               status, submit_authorized, authorization_source,
+               decline_delay_hours, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?)""",
         (
             account,
             brand,
@@ -169,6 +186,7 @@ def create_campaign(
             json.dumps(route),
             route_index,
             1 if submit_authorized else 0,
+            str(authorization_source or "manual_cli"),
             float(config["decline_delay_hours"]),
             now,
             now,
@@ -195,6 +213,7 @@ def create_campaign(
         "current_route_index": route_index,
         "status": "scheduled",
         "submit_authorized": 1 if submit_authorized else 0,
+        "authorization_source": str(authorization_source or "manual_cli"),
         "decline_delay_hours": float(config["decline_delay_hours"]),
         "attempt": {
             "id": attempt_id,
@@ -258,15 +277,26 @@ def declined_case_candidate(settings: Mapping[str, Any], followup_id: int) -> di
     }
 
 
-def list_eligible_declined_cases(settings: Mapping[str, Any], limit: int = 100) -> list[dict[str, Any]]:
+def list_eligible_declined_cases(
+    settings: Mapping[str, Any],
+    limit: int = 100,
+    *,
+    min_followup_id: int | None = None,
+) -> list[dict[str, Any]]:
     db_path = _db_path(settings)
     init_db(db_path)
     conn = get_conn(db_path)
+    where = "status='completed' AND final_result='declined'"
+    params: list[Any] = []
+    if min_followup_id is not None:
+        where += " AND id>=?"
+        params.append(max(0, int(min_followup_id)))
+    params.append(max(1, min(500, int(limit))))
     rows = conn.execute(
-        """SELECT id FROM case_followups
-           WHERE status='completed' AND final_result='declined'
-           ORDER BY completed_at DESC, id DESC LIMIT ?""",
-        (max(1, min(500, int(limit))),),
+        f"""SELECT id FROM case_followups
+            WHERE {where}
+            ORDER BY completed_at DESC, id DESC LIMIT ?""",
+        params,
     ).fetchall()
     conn.close()
     eligible: list[dict[str, Any]] = []
@@ -315,6 +345,7 @@ def create_campaign_from_declined_case(
     *,
     confirmed_remaining_route: list[str] | tuple[str, ...],
     authorize_submit: bool,
+    authorization_source: str = "manual_case",
 ) -> dict[str, Any]:
     """Authorize one declined Case and schedule only its next route site."""
     if not authorize_submit:
@@ -372,12 +403,13 @@ def create_campaign_from_declined_case(
         cur = conn.execute(
             """INSERT INTO reapplication_campaigns(
                    account_id, brand_name, region, route_json, current_route_index,
-                   status, submit_authorized, decline_delay_hours,
+                   status, submit_authorized, authorization_source, decline_delay_hours,
                    source_case_followup_id, source_marketplace, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?, ?)""",
             (
                 candidate["account_id"], candidate["brand_name"], candidate["region"],
                 json.dumps(candidate["route"]), next_index,
+                str(authorization_source or "manual_case"),
                 float(config["decline_delay_hours"]), int(followup_id),
                 candidate["marketplace"], now, now,
             ),
@@ -423,6 +455,7 @@ def create_campaign_from_declined_case(
             "current_route_index": next_index,
             "status": "scheduled",
             "submit_authorized": 1,
+            "authorization_source": str(authorization_source or "manual_case"),
             "decline_delay_hours": float(config["decline_delay_hours"]),
             "source_case_followup_id": int(followup_id),
             "source_marketplace": candidate["marketplace"],
@@ -438,6 +471,114 @@ def create_campaign_from_declined_case(
         raise
     finally:
         conn.close()
+
+
+def auto_schedule_declined_case(
+    settings: Mapping[str, Any],
+    followup_id: int,
+    *,
+    launch_worker: bool = True,
+) -> dict[str, Any]:
+    """Idempotently continue one explicit decline without a second approval.
+
+    A Case follow-up exists only after a real, explicitly authorized submit;
+    this carries that exact account/site/brand authorization forward through
+    the configured finite route.  Unknown and technical outcomes never call
+    this function.
+    """
+
+    config = get_reapplication_config(settings)
+    if not config["enabled"] or not config["auto_authorize_declined_cases"]:
+        return {"status": "disabled", "created": False}
+    min_followup_id = int(config["auto_backfill_min_followup_id"])
+    if min_followup_id and int(followup_id) < min_followup_id:
+        return {
+            "status": "before_cutoff",
+            "created": False,
+            "min_followup_id": min_followup_id,
+        }
+    existing = get_campaign_by_source_case(settings, followup_id)
+    if existing is not None:
+        return {
+            "status": str(existing.get("status") or "existing_campaign"),
+            "created": False,
+            "campaign_id": int(existing["id"]),
+        }
+    candidate = declined_case_candidate(settings, followup_id)
+    campaign = create_campaign_from_declined_case(
+        settings,
+        followup_id,
+        confirmed_remaining_route=candidate["remaining_route"],
+        authorize_submit=True,
+        authorization_source="automatic_decline",
+    )
+    worker = {"started": False, "reason": "not_requested"}
+    if launch_worker and campaign.get("created"):
+        worker = launch_reapplication_worker(settings)
+    return {
+        "status": str(campaign.get("status") or "scheduled"),
+        "created": bool(campaign.get("created")),
+        "campaign_id": int(campaign["id"]),
+        "next_site": candidate["next_site"],
+        "worker": worker,
+    }
+
+
+def auto_schedule_declined_cases(
+    settings: Mapping[str, Any],
+    *,
+    limit: int | None = None,
+    launch_worker: bool = True,
+) -> dict[str, Any]:
+    """Backfill eligible completed declines into finite campaigns once."""
+
+    config = get_reapplication_config(settings)
+    if (
+        not config["enabled"]
+        or not config["auto_authorize_declined_cases"]
+        or not config["auto_backfill_declined_cases"]
+    ):
+        return {"status": "disabled", "created": 0, "skipped": 0, "errors": 0}
+
+    candidates = list_eligible_declined_cases(
+        settings,
+        limit=limit or int(config["auto_backfill_limit"]),
+        min_followup_id=int(config["auto_backfill_min_followup_id"]),
+    )
+    created = 0
+    skipped = 0
+    errors = 0
+    for candidate in candidates:
+        try:
+            result = auto_schedule_declined_case(
+                settings,
+                int(candidate["id"]),
+                launch_worker=False,
+            )
+        except ReapplicationStartError:
+            skipped += 1
+            continue
+        except Exception:
+            errors += 1
+            continue
+        if result.get("created"):
+            created += 1
+        else:
+            skipped += 1
+
+    worker = {
+        "started": False,
+        "reason": "not_requested" if created else "no_new_campaigns",
+    }
+    if launch_worker and created:
+        worker = launch_reapplication_worker(settings)
+    return {
+        "status": "completed",
+        "created": created,
+        "skipped": skipped,
+        "errors": errors,
+        "worker": worker,
+    }
 
 
 def attach_case_followup(
@@ -477,13 +618,15 @@ def attach_case_followup(
     conn.execute(
         """UPDATE reapplication_attempts
            SET status='waiting_case', case_id=?, case_followup_id=?,
-               submitted_at=COALESCE(submitted_at, ?), updated_at=?
+               submitted_at=COALESCE(submitted_at, ?), final_result=NULL,
+               decision_reason=NULL, error=NULL, updated_at=?
            WHERE id=?""",
         (str(case_id), int(followup_id), now, now, int(attempt_id)),
     )
     conn.execute(
         """UPDATE reapplication_campaigns
-           SET status='waiting_case', current_route_index=?, updated_at=?
+           SET status='waiting_case', current_route_index=?,
+               stop_reason=NULL, updated_at=?
            WHERE id=?""",
         (int(attempt["route_index"]), now, int(campaign_id)),
     )
@@ -753,6 +896,12 @@ def claim_due_attempt(
            WHERE a.status='scheduled' AND a.scheduled_at <= ?
              AND c.status IN ('scheduled', 'next_scheduled')
              AND c.submit_authorized=1
+             AND NOT EXISTS (
+               SELECT 1 FROM account_auth_blocks b
+               LEFT JOIN account_profile_bindings p ON p.profile_key=b.profile_key
+               WHERE b.status='open'
+                 AND (b.account_id=c.account_id OR p.account_id=c.account_id)
+             )
            ORDER BY a.scheduled_at, a.id LIMIT 1""",
         (due,),
     ).fetchone()
@@ -937,6 +1086,358 @@ def get_attempt(settings: Mapping[str, Any], attempt_id: int) -> dict[str, Any] 
     return dict(row) if row else None
 
 
+def _attempt_state_path(attempt: Mapping[str, Any]) -> Path:
+    stored = str(attempt.get("state_path") or "").strip()
+    if stored:
+        path = Path(stored)
+        return path if path.is_absolute() else PROJECT_ROOT / path
+    return build_attempt_paths(attempt)["state"]
+
+
+def _state_dashboard_draft_confirmation(
+    attempt: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return exact machine evidence for an immediate post-submit Draft.
+
+    This path is deliberately stricter than merely finding ``draft`` in a
+    state file: the item scope, checker navigation, exact Catalog
+    Authorization match, unique brand mention, no Case ID and retained
+    evidence must all agree.
+    """
+
+    state_path = _attempt_state_path(attempt)
+    if not state_path.exists():
+        return None
+    state = read_json_tolerant(state_path)
+    if not isinstance(state, dict):
+        return None
+    for batch in state.get("batches") or []:
+        if not isinstance(batch, dict):
+            continue
+        for item in batch.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if int(item.get("reapplication_attempt_id") or 0) != int(attempt["id"]):
+                continue
+            if str(item.get("account_id") or "").strip() != str(attempt["account_id"]):
+                continue
+            if str(item.get("brand_name") or "").strip().casefold() != str(
+                attempt["brand_name"]
+            ).strip().casefold():
+                continue
+            if str(item.get("site") or "").strip().upper() != str(attempt["site"]).upper():
+                continue
+            result = item.get("result")
+            if not isinstance(result, dict) or str(result.get("status") or "").lower() != "draft":
+                continue
+            dashboard = result.get("dashboard_check")
+            if not isinstance(dashboard, dict):
+                continue
+            navigation = dashboard.get("dashboard_navigation")
+            if (
+                dashboard.get("checked") is not True
+                or str(dashboard.get("status") or "").lower() != "draft"
+                or not isinstance(navigation, dict)
+                or navigation.get("ok") is not True
+                or int(dashboard.get("brand_mentions") or 0) != 1
+                or result.get("case_id")
+                or dashboard.get("case_id")
+            ):
+                continue
+            matched = str(dashboard.get("matched_text") or "")
+            matched_folded = matched.casefold()
+            if (
+                str(attempt["brand_name"]).strip().casefold() not in matched_folded
+                or "draft" not in matched_folded
+                or not any(marker in matched_folded for marker in ("catalog", "catalogue"))
+            ):
+                continue
+            evidence_files = dashboard.get("evidence_files") or []
+            retained: list[str] = []
+            for value in evidence_files:
+                evidence_path = Path(str(value))
+                if not evidence_path.is_absolute():
+                    evidence_path = PROJECT_ROOT / evidence_path
+                if evidence_path.exists():
+                    retained.append(str(evidence_path))
+            if not retained:
+                continue
+            return {
+                "source": "immediate_dashboard",
+                "state_path": str(state_path),
+                "matched_text": matched,
+                "evidence_files": retained,
+            }
+    return None
+
+
+def confirmed_draft_confirmation(
+    settings: Mapping[str, Any],
+    attempt_id: int,
+) -> dict[str, Any] | None:
+    """Find a fail-closed Draft confirmation for one exact attempt."""
+
+    db_path = _db_path(settings)
+    init_db(db_path)
+    attempt = get_attempt(settings, attempt_id)
+    if not attempt:
+        return None
+    conn = get_conn(db_path)
+    recovery = conn.execute(
+        """SELECT id, evidence_path FROM case_id_recoveries
+           WHERE reapplication_attempt_id=?
+             AND UPPER(marketplace)=UPPER(?)
+             AND brand_name=? COLLATE NOCASE
+             AND status='manual_review' AND LOWER(dashboard_status)='draft'
+             AND COALESCE(case_id, '')=''
+           ORDER BY id DESC LIMIT 1""",
+        (int(attempt_id), str(attempt["site"]), str(attempt["brand_name"])),
+    ).fetchone()
+    if recovery:
+        conn.close()
+        return {
+            "source": "case_id_recovery",
+            "confirmation_id": int(recovery["id"]),
+            "evidence_path": str(recovery["evidence_path"] or ""),
+        }
+    checkpoint = conn.execute(
+        """SELECT id FROM submission_checkpoints
+           WHERE owner_type='reapplication_attempt' AND owner_id=?
+             AND account_id=? AND UPPER(marketplace)=UPPER(?)
+             AND brand_name=? COLLATE NOCASE
+             AND status='manual_review' AND phase='reconciliation'
+             AND submit_click_fenced_at IS NOT NULL
+             AND COALESCE(case_id, '')=''
+           ORDER BY id DESC LIMIT 1""",
+        (
+            str(attempt_id),
+            str(attempt["account_id"]),
+            str(attempt["site"]),
+            str(attempt["brand_name"]),
+        ),
+    ).fetchone()
+    conn.close()
+    if not checkpoint:
+        return None
+    state_confirmation = _state_dashboard_draft_confirmation(attempt)
+    if not state_confirmation:
+        return None
+    return {
+        **state_confirmation,
+        "checkpoint_id": int(checkpoint["id"]),
+    }
+
+
+def mark_confirmed_draft_attempt(
+    settings: Mapping[str, Any],
+    attempt_id: int,
+) -> dict[str, Any] | None:
+    """Persist Draft as a recoverable business state without clearing its fence."""
+
+    confirmation = confirmed_draft_confirmation(settings, attempt_id)
+    if not confirmation:
+        return None
+    db_path = _db_path(settings)
+    now = now_str()
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """SELECT a.campaign_id, a.status, c.status AS campaign_status
+               FROM reapplication_attempts a
+               JOIN reapplication_campaigns c ON c.id=a.campaign_id
+               WHERE a.id=?""",
+            (int(attempt_id),),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        if row["status"] not in {"running", "failed", "manual_review"}:
+            conn.rollback()
+            return None
+        if row["campaign_status"] not in {"running", "paused"}:
+            conn.rollback()
+            return None
+        conn.execute(
+            """UPDATE reapplication_attempts
+               SET status='manual_review', final_result='draft',
+                   decision_reason=?, error=NULL,
+                   completed_at=COALESCE(completed_at, ?), updated_at=?
+               WHERE id=?""",
+            (CONFIRMED_DRAFT_REASON, now, now, int(attempt_id)),
+        )
+        conn.execute(
+            """UPDATE reapplication_campaigns
+               SET status='paused', stop_reason=?, updated_at=? WHERE id=?""",
+            (CONFIRMED_DRAFT_REASON, now, int(row["campaign_id"])),
+        )
+        conn.execute(
+            """UPDATE submission_checkpoints
+               SET status='manual_review', phase='reconciliation',
+                   detail=?, updated_at=?
+               WHERE owner_type='reapplication_attempt' AND owner_id=?
+                 AND submit_click_fenced_at IS NOT NULL""",
+            (CONFIRMED_DRAFT_REASON, now, str(attempt_id)),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {
+        "status": "draft",
+        "attempt_id": int(attempt_id),
+        "campaign_status": "paused",
+        "reason": CONFIRMED_DRAFT_REASON,
+        "confirmation": confirmation,
+    }
+
+
+def rearm_confirmed_draft_attempt(
+    settings: Mapping[str, Any],
+    attempt_id: int,
+    *,
+    authorized_by: str,
+    scheduled_at: str | None = None,
+) -> dict[str, Any]:
+    """Rearm one fenced attempt only after its exact Dashboard row was Draft.
+
+    A submit fence normally forbids a second click. Draft is the one safe
+    exception when either Case-ID recovery or the immediate post-submit
+    Dashboard checker persisted exact, navigated Catalog Authorization Draft
+    evidence. The prior batch state is archived before the attempt and its
+    checkpoint are reset, preserving the failed run for audit.
+    """
+
+    actor = _safe_reason(authorized_by, 200).strip()
+    if not actor:
+        raise ValueError("authorized_by is required")
+    db_path = _db_path(settings)
+    init_db(db_path)
+    marked = mark_confirmed_draft_attempt(settings, attempt_id)
+    if not marked:
+        raise ReapplicationStartError("dashboard_draft_not_confirmed")
+    confirmation = dict(marked["confirmation"])
+    conn = get_conn(db_path)
+    row = conn.execute(
+        """SELECT a.*, c.account_id, c.brand_name, c.status AS campaign_status,
+                  c.submit_authorized
+           FROM reapplication_attempts a
+           JOIN reapplication_campaigns c ON c.id=a.campaign_id
+           WHERE a.id=?""",
+        (int(attempt_id),),
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise ReapplicationStartError("attempt_not_found")
+    attempt = dict(row)
+    if not int(attempt.get("submit_authorized") or 0):
+        conn.close()
+        raise ReapplicationStartError("submit_not_authorized")
+    if (
+        attempt.get("status") != "manual_review"
+        or attempt.get("campaign_status") != "paused"
+        or attempt.get("final_result") != "draft"
+    ):
+        conn.close()
+        raise ReapplicationStartError("attempt_not_paused_for_manual_review")
+    conn.close()
+
+    paths = build_attempt_paths(attempt)
+    archived_state = ""
+    if paths["state"].exists():
+        prior_state = read_json_tolerant(paths["state"])
+        if not isinstance(prior_state, dict):
+            raise ReapplicationStartError("attempt_state_unreadable")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        backup = paths["state"].with_name(
+            f"{paths['state'].stem}.before_draft_retry_{stamp}.json"
+        )
+        atomic_write_json(backup, prior_state)
+        paths["state"].unlink()
+        archived_state = str(backup)
+
+    now = now_str()
+    due = scheduled_at or now
+    detail = (
+        "Dashboard Draft confirmed via "
+        f"{confirmation['source']}; explicit retry authorized by {actor}"
+    )
+    conn = get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        checkpoint_changed = conn.execute(
+            """UPDATE submission_checkpoints
+               SET phase='draft_retry_authorized', status='active',
+                   submit_intent_at=NULL, submit_click_fenced_at=NULL,
+                   resumed_at=?, auth_block_id=NULL, case_id=NULL,
+                   detail=?, updated_at=?
+               WHERE owner_type='reapplication_attempt' AND owner_id=?
+                 AND UPPER(marketplace)=UPPER(?) AND brand_name=? COLLATE NOCASE""",
+            (
+                now,
+                detail,
+                now,
+                str(attempt_id),
+                str(attempt["site"]),
+                str(attempt["brand_name"]),
+            ),
+        ).rowcount
+        if checkpoint_changed != 1:
+            raise ReapplicationStartError("draft_checkpoint_changed_during_retry")
+        changed = conn.execute(
+            """UPDATE reapplication_attempts
+               SET status='scheduled', scheduled_at=?, started_at=NULL,
+                   submitted_at=NULL, completed_at=NULL, case_id=NULL,
+                   case_followup_id=NULL, final_result=NULL,
+                   decision_reason=?, error=NULL, state_path=NULL,
+                   stdout_path=NULL, stderr_path=NULL, pid=NULL,
+                   auth_block_id=NULL, updated_at=?
+               WHERE id=? AND status='manual_review'""",
+            (due, detail, now, int(attempt_id)),
+        ).rowcount
+        if not changed:
+            raise ReapplicationStartError("attempt_changed_during_retry")
+        campaign_changed = conn.execute(
+            """UPDATE reapplication_campaigns
+               SET status='next_scheduled', stop_reason=?, completed_at=NULL,
+                   updated_at=? WHERE id=? AND status='paused'""",
+            (detail, now, int(attempt["campaign_id"])),
+        ).rowcount
+        if campaign_changed != 1:
+            raise ReapplicationStartError("campaign_changed_during_retry")
+        if confirmation.get("source") == "case_id_recovery":
+            conn.execute(
+                """UPDATE case_id_recoveries
+                   SET status='resolved', decision_reason=?, completed_at=?, updated_at=?
+                   WHERE id=? AND status='manual_review'""",
+                (
+                    detail,
+                    now,
+                    now,
+                    int(confirmation["confirmation_id"]),
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        conn.close()
+        if archived_state and not paths["state"].exists():
+            prior_state = read_json_tolerant(archived_state)
+            if isinstance(prior_state, dict):
+                atomic_write_json(paths["state"], prior_state)
+        raise
+    conn.close()
+    return {
+        "status": "scheduled",
+        "attempt_id": int(attempt_id),
+        "scheduled_at": due,
+        "archived_state": archived_state,
+        "confirmation_source": confirmation["source"],
+    }
+
+
 def list_campaigns(
     settings: Mapping[str, Any],
     statuses: set[str] | None = None,
@@ -969,7 +1470,13 @@ def get_next_attempt_due(settings: Mapping[str, Any]) -> str | None:
            JOIN reapplication_campaigns c ON c.id=a.campaign_id
            WHERE a.status='scheduled'
              AND c.status IN ('scheduled', 'next_scheduled')
-             AND c.submit_authorized=1"""
+             AND c.submit_authorized=1
+             AND NOT EXISTS (
+               SELECT 1 FROM account_auth_blocks b
+               LEFT JOIN account_profile_bindings p ON p.profile_key=b.profile_key
+               WHERE b.status='open'
+                 AND (b.account_id=c.account_id OR p.account_id=c.account_id)
+             )"""
     ).fetchone()
     conn.close()
     return str(row["scheduled_at"]) if row and row["scheduled_at"] else None

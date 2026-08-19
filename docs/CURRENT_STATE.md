@@ -132,7 +132,7 @@ from CDP failures and never change a business result.
 
 ## Finite reapplication routes
 
-Explicitly authorized campaigns can continue an explicitly declined
+The reapplication engine can automatically continue an explicitly declined
 application through a finite regional route: `US -> MX` for NA, and
 `UK -> BE -> DE -> SE -> NL -> FR` for EU. The next site is scheduled two hours
 after the rejection. Effective approval stops the campaign; rejection at the
@@ -141,9 +141,23 @@ Case in `waiting_case`; manual/unknown Case replies and every technical failure
 pause rather than advance. Campaign and attempt rows are linked to the exact
 Case follow-up in SQLite, and each attempt has unique state and log files.
 
-The campaign CLI requires the account, brand, region, `--submit`, and `--yes`
-before any real run can be dispatched. A command without `--submit` is a
-read-only preflight. See `docs/runbooks/runbook-reapplication-campaigns.md`.
+Automatic creation is guarded by `reapplication.auto_authorize_declined_cases`.
+When deliberately enabled for an explicitly approved operational scope, a new
+completed `declined` Case immediately creates the next-site campaign with
+`authorization_source=automatic_decline` and launches the finite worker. The
+optional `auto_backfill_declined_cases` startup scan handles unlinked historical
+declines idempotently. `auto_backfill_min_followup_id` provides an inclusive,
+persistent Case-row waterline for both startup scans and real-time transitions,
+so an approved start point cannot accidentally pull in older history. The
+active local settings enable both switches with inclusive waterline `179`,
+which is the explicitly approved `us_store_682 / WILLONE / UK` rejection; older
+records remain excluded. The Web console shows the switch and waterline states
+and retains its Reviewer/Admin manual action only as an audited recovery path.
+
+The campaign CLI recovery path still requires the account, brand, region,
+`--submit`, and `--yes` before any real run can be dispatched. A command without
+`--submit` is a read-only preflight. See
+`docs/runbooks/runbook-reapplication-campaigns.md`.
 
 MX now follows the same shared-progress policy as EU: its result targets the US
 row's `5461进度`, while the exact MX detail row remains separate. Missing US and
@@ -159,6 +173,43 @@ the existing delayed Case-detail worker. Reapplication campaigns remain in
 `waiting_case_id` during this process and cannot advance countries from a
 missing or ambiguous Case ID.
 
+Managed Web jobs now carry the same reconciliation result back into their
+per-job state. A unique recovered Case ID closes only the exact fenced brand;
+the state file is atomically updated before pending brands can be requeued, so
+the fenced brand and earlier failed brands are not submitted again. Missing
+state, ambiguity, or another human pause fails closed. Job details keep the
+raw execution status separate from the authoritative checkpoint/Case/
+Dashboard business status and refresh that per-brand truth every five seconds.
+
+Finite reapplications also preserve an immediate, exactly matched Catalog
+Authorization `Draft` as a recoverable business result instead of degrading it
+to “batch ended without a linked Case follow-up”. The submit fence remains in
+place until a separately explicit, exact-scope Draft recovery archives the old
+state and rearms only that attempt.
+
+## Seller Central authentication recovery
+
+Normal 5461 jobs, finite reapplications, Case-ID recovery and Case follow-up
+now share one deterministic authentication guard. Login expiry, CAPTCHA, 2FA,
+account-risk and unknown authentication pages create a persistent account-level
+block keyed by a one-way AdsPower profile identifier. The exact profile and
+login page stay open while Playwright detaches; work for that profile pauses,
+while other accounts remain dispatchable.
+
+Every managed submission has a durable intent/checkpoint and a click fence
+written before the browser click is dispatched. A pre-click interruption
+resumes the current site after authentication. A post-click interruption can
+only enter Selling Applications/Case reconciliation and cannot click Submit a
+second time. The first reconciliation is scheduled after 10 minutes and then
+every 30 minutes for at most 12 attempts. Draft, ambiguity, conflict and
+exhaustion become manual review rather than a reapplication trigger.
+
+The console exposes persistent login cards and reviewer/admin-only audited
+actions through `/api/auth-blocks`. The top navigation, Pending page,
+Applications table, job details and reapplication timeline all display the
+same SQLite-backed state and poll every 15 seconds; passive backend verification
+runs every five minutes. See `docs/runbooks/runbook-auth-recovery.md`.
+
 ## Read-only web console (plan stage 2)
 
 The internal LAN console from
@@ -173,8 +224,9 @@ and verified read-only:
   `WEB_SESSION_SECRET` in `.env`.
 - Read APIs cover health, catalog (accounts are stripped of username,
   AdsPower profile and entry URL), jobs, applications with the authoritative
-  status read model (Case reply > Dashboard same-day > explicit Case ID >
-  local batch state), Case follow-ups, Case ID recoveries, reapplication
+  status read model (active authentication/submission checkpoint > Case reply
+  > Dashboard same-day > explicit Case ID > local batch state), Case
+  follow-ups, Case ID recoveries, reapplication
   campaigns, and evidence files guarded by an allowlist root with text
   redaction.
 - `src/db.py` connections now use WAL + busy_timeout; batch state writes go

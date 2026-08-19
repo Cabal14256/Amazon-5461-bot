@@ -19,11 +19,28 @@ from typing import Any
 
 from .browser_manager import BrowserManager
 from .case_dashboard_checker import check_case_dashboard_for_brand
-from .config_loader import load_yaml
-from .db import get_conn, init_db, now_str
+from .config_loader import load_yaml, resolve_accounts_path
+from .db import (
+    acquire_profile_lock,
+    get_conn,
+    init_db,
+    now_str,
+    release_profile_lock,
+)
+from .jobs.profile_locks import profile_key_for_account, profile_key_for_profile_id
 from .marketplace_switcher import switch_marketplace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _pid_running(pid: int | None) -> bool:
+    if not pid or int(pid) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, SystemError):
+        return False
+    return True
 
 
 def _db_path(settings: Mapping[str, Any]) -> str:
@@ -85,6 +102,7 @@ def is_case_id_recovery_candidate(result: Mapping[str, Any]) -> bool:
         "uncertain",
         "under_review",
         "submitted_no_case_id_pending_dashboard",
+        "waiting_reconciliation",
         "unknown",
     }:
         return True
@@ -246,8 +264,14 @@ def claim_due_case_id_recoveries(
     conn = get_conn(db_path)
     conn.execute("BEGIN IMMEDIATE")
     rows = conn.execute(
-        """SELECT * FROM case_id_recoveries
-           WHERE status IN ('pending', 'retry') AND scheduled_at <= ?
+        """SELECT r.* FROM case_id_recoveries r
+           WHERE r.status IN ('pending', 'retry') AND r.scheduled_at <= ?
+             AND NOT EXISTS (
+               SELECT 1 FROM account_auth_blocks b
+               LEFT JOIN account_profile_bindings p ON p.profile_key=b.profile_key
+               WHERE b.status='open'
+                 AND (b.account_id=r.account_id OR p.account_id=r.account_id)
+             )
            ORDER BY scheduled_at, id LIMIT ?""",
         (due, max(1, int(limit))),
     ).fetchall()
@@ -351,6 +375,29 @@ def _reschedule_recovery(
     return scheduled_at
 
 
+def _reschedule_profile_busy(
+    settings: Mapping[str, Any],
+    recovery_id: int,
+) -> str:
+    """Yield a claimed lookup without consuming a Dashboard-check attempt."""
+
+    config = get_case_id_recovery_config(settings)
+    retry_minutes = min(5.0, float(config["retry_interval_minutes"]))
+    scheduled_at = _db_datetime(datetime.now() + timedelta(minutes=retry_minutes))
+    conn = get_conn(_db_path(settings))
+    conn.execute(
+        """UPDATE case_id_recoveries
+           SET status='retry', scheduled_at=?, dashboard_status='profile_busy',
+               decision_reason='AdsPower profile is held by another worker',
+               attempt_count=CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END,
+               updated_at=? WHERE id=?""",
+        (scheduled_at, now_str(), int(recovery_id)),
+    )
+    conn.commit()
+    conn.close()
+    return scheduled_at
+
+
 def check_selling_applications(
     settings: Mapping[str, Any],
     account_id: str,
@@ -388,6 +435,7 @@ def check_selling_applications(
         profile_restart_wait_sec=float(browser.get("profile_restart_wait_sec") or 5.0),
     )
     page = None
+    leave_page_open = False
     try:
         _, account = manager.connect_by_account(account_id)
         available_sites = account.get("marketplace_configs") or {}
@@ -424,12 +472,14 @@ def check_selling_applications(
         dashboard["evidence_dir"] = str(out_dir)
         return dashboard
     except CaseFollowupBlocked as exc:
+        leave_page_open = True
         return {
             "checked": False,
             "status": "blocked",
             "case_id": None,
             "case_ids": [],
             "error": str(exc),
+            "block_type": str(exc),
             "evidence_dir": str(out_dir),
         }
     except Exception as exc:
@@ -443,7 +493,7 @@ def check_selling_applications(
         }
     finally:
         try:
-            if page:
+            if page and not leave_page_open:
                 page.close()
         except Exception:
             pass
@@ -453,7 +503,7 @@ def check_selling_applications(
             pass
 
 
-def process_claimed_recovery(
+def _process_claimed_recovery_unlocked(
     settings: Mapping[str, Any],
     task: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -496,6 +546,17 @@ def process_claimed_recovery(
             reason="unique exact-brand Case ID recovered from View Selling Applications",
             evidence_path=evidence_path,
         )
+        from .auth_recovery import finish_submission_reconciliation
+
+        finish_submission_reconciliation(
+            settings,
+            account_id=str(task["account_id"]),
+            marketplace=str(task["marketplace"]),
+            brand_name=str(task["brand_name"]),
+            status="waiting_case",
+            case_id=case_id,
+            detail="Unique exact-brand Case ID recovered",
+        )
         return {
             "status": "recovered",
             "case_id": case_id,
@@ -519,7 +580,22 @@ def process_claimed_recovery(
             evidence_path=evidence_path,
             error=reason,
         )
+        from .auth_recovery import create_auth_block
         from .reapplication import pause_missing_case_id_attempt
+
+        auth_block = create_auth_block(
+            settings,
+            account_id=str(task["account_id"]),
+            marketplace=str(task["marketplace"]),
+            brand_name=str(task["brand_name"]),
+            block_type=str(dashboard.get("block_type") or "login_required"),
+            phase="case_id_recovery",
+            source_type="case_id_recovery",
+            source_id=int(task["id"]),
+            submit_fenced=True,
+            evidence_path=evidence_path,
+            detail=reason,
+        )
 
         pause_missing_case_id_attempt(
             settings,
@@ -528,7 +604,7 @@ def process_claimed_recovery(
             "Case-ID recovery blocked by login/CAPTCHA/2FA",
             blocked=True,
         )
-        return {"status": "blocked", "reason": reason}
+        return {"status": "blocked", "reason": reason, "auth_block_id": auth_block["id"]}
 
     if dashboard_status == "draft" or int(task.get("attempt_count") or 0) >= int(
         config["max_attempts"]
@@ -542,6 +618,16 @@ def process_claimed_recovery(
             reason=final_reason,
             evidence_path=evidence_path,
             error=reason,
+        )
+        from .auth_recovery import finish_submission_reconciliation
+
+        finish_submission_reconciliation(
+            settings,
+            account_id=str(task["account_id"]),
+            marketplace=str(task["marketplace"]),
+            brand_name=str(task["brand_name"]),
+            status="manual_review",
+            detail=final_reason,
         )
         from .reapplication import pause_missing_case_id_attempt
 
@@ -568,6 +654,44 @@ def process_claimed_recovery(
     }
 
 
+def process_claimed_recovery(
+    settings: Mapping[str, Any],
+    task: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Run one Dashboard lookup while exclusively owning its AdsPower profile."""
+
+    db_path = _db_path(settings)
+    init_db(db_path)
+    accounts_path = resolve_accounts_path(
+        str((settings.get("paths") or {}).get("accounts_path") or "config/accounts.json")
+    )
+    account_id = str(task["account_id"])
+    profile_key = profile_key_for_account(accounts_path, account_id)
+    if not profile_key:
+        profile_key = profile_key_for_profile_id(f"account:{account_id}")
+    owner_id = f"case-id-recovery:{os.getpid()}:{int(task['id'])}:{account_id}"
+    acquired = acquire_profile_lock(
+        db_path,
+        profile_key,
+        owner_type="case_id_recovery_worker",
+        owner_id=owner_id,
+        ttl_seconds=1800,
+        pid_alive=_pid_running,
+    )
+    if not acquired:
+        scheduled_at = _reschedule_profile_busy(settings, int(task["id"]))
+        return {
+            "status": "retry",
+            "dashboard_status": "profile_busy",
+            "reason": "AdsPower profile is held by another worker",
+            "scheduled_at": scheduled_at,
+        }
+    try:
+        return _process_claimed_recovery_unlocked(settings, task)
+    finally:
+        release_profile_lock(db_path, profile_key, owner_id=owner_id)
+
+
 def process_due_case_id_recoveries(
     settings: Mapping[str, Any] | None = None,
     *,
@@ -584,7 +708,14 @@ def get_next_case_id_recovery_due(settings: Mapping[str, Any]) -> str | None:
     conn = get_conn(db_path)
     row = conn.execute(
         """SELECT MIN(scheduled_at) AS scheduled_at FROM case_id_recoveries
-           WHERE status IN ('pending', 'retry')"""
+           WHERE status IN ('pending', 'retry')
+             AND NOT EXISTS (
+               SELECT 1 FROM account_auth_blocks b
+               LEFT JOIN account_profile_bindings p ON p.profile_key=b.profile_key
+               WHERE b.status='open'
+                 AND (b.account_id=case_id_recoveries.account_id
+                      OR p.account_id=case_id_recoveries.account_id)
+             )"""
     ).fetchone()
     conn.close()
     return str(row["scheduled_at"]) if row and row["scheduled_at"] else None

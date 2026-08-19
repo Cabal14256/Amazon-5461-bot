@@ -1,12 +1,22 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { NBadge, NButton, NCard, NEmpty, NInput, NSpin, useDialog, useMessage } from 'naive-ui'
-import { closeIncident, getCaseIdRecoveries, getIncidents, getPendingItems, getReapplications } from '@/api'
+import { NAlert, NBadge, NButton, NCard, NEmpty, NInput, NSpin, NTag, useDialog, useMessage } from 'naive-ui'
+import {
+  closeIncident,
+  getAuthBlocks,
+  getCaseIdRecoveries,
+  getIncidents,
+  getPendingItems,
+  getReapplications,
+  openAuthProfile,
+  verifyAndResumeAuth,
+} from '@/api'
 import { USE_MOCK } from '@/api/client'
 import { ApiError } from '@/api/http'
 import {
   REPAIR_CLASSIFICATIONS,
+  type AuthBlock,
   type CaseIdRecovery,
   type Incident,
   type PendingCategory,
@@ -27,30 +37,106 @@ const items = ref<PendingItem[]>([])
 const recoveries = ref<CaseIdRecovery[]>([])
 const manualCampaigns = ref<ReapplicationCampaign[]>([])
 const incidents = ref<Incident[]>([])
+const authBlocks = ref<AuthBlock[]>([])
 const loading = ref(true)
+const loadError = ref('')
+const actionState = ref<Record<number, 'opening' | 'verifying' | undefined>>({})
+let refreshTimer: ReturnType<typeof setInterval> | null = null
 
-onMounted(async () => {
-  if (USE_MOCK) {
-    items.value = await getPendingItems()
-  } else {
-    const [rec, camps, inc] = await Promise.all([
-      getCaseIdRecoveries(),
-      getReapplications(),
-      // incident 接口（阶段 5）不可用时降级为空，不影响既有两张卡片
-      getIncidents({ status: 'open' }).catch(() => ({ incidents: [] as Incident[], total: 0 })),
-    ])
-    // 未完成或需人工核对的找回项算待处理；已完成/已取消的历史不展示
-    recoveries.value = rec.filter((r) => !['completed', 'cancelled'].includes(r.status))
-    // campaign 本身 manual_review/blocked，或任一 attempt 需人工审核
-    manualCampaigns.value = camps.filter(
-      (c) =>
-        ['manual_review', 'blocked'].includes(c.status) ||
-        c.attempts.some((a) => ['manual_review', 'blocked'].includes(a.status)),
-    )
-    incidents.value = inc.incidents
+async function loadPage(showLoading = false) {
+  if (showLoading) loading.value = true
+  try {
+    if (USE_MOCK) {
+      items.value = await getPendingItems()
+    } else {
+      const [blocks, rec, camps, inc] = await Promise.all([
+        getAuthBlocks(),
+        getCaseIdRecoveries(),
+        getReapplications(),
+        // incident 接口（阶段 5）不可用时降级为空，不影响既有两张卡片
+        getIncidents({ status: 'open' }).catch(() => ({ incidents: [] as Incident[], total: 0 })),
+      ])
+      authBlocks.value = blocks
+      // 未完成或需人工核对的找回项算待处理；已完成/已取消的历史不展示
+      recoveries.value = rec.filter((r) => !['completed', 'cancelled'].includes(r.status))
+      // campaign 本身 manual_review/blocked，或任一 attempt 需人工审核
+      manualCampaigns.value = camps.filter(
+        (c) =>
+          ['manual_review', 'blocked'].includes(c.status) ||
+          c.attempts.some((a) => ['manual_review', 'blocked'].includes(a.status)),
+      )
+      incidents.value = inc.incidents
+    }
+    loadError.value = ''
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : '状态读取失败'
+  } finally {
+    loading.value = false
   }
-  loading.value = false
+}
+
+onMounted(() => {
+  void loadPage(true)
+  refreshTimer = setInterval(() => void loadPage(false), 15_000)
 })
+onUnmounted(() => {
+  if (refreshTimer) clearInterval(refreshTimer)
+})
+
+const BLOCK_LABEL: Record<string, string> = {
+  login_required: '登录过期',
+  captcha_required: 'CAPTCHA',
+  two_factor_required: '2FA',
+  account_risk: '账户风控',
+  unknown_auth_state: '认证页面待确认',
+}
+
+function phaseLabel(block: AuthBlock): string {
+  if (block.source_type === 'case_followup') return 'Case 跟进'
+  if (block.submit_fenced) return '提交后结果未知'
+  return '提交前'
+}
+
+function evidenceUrl(path: string): string {
+  return `/api/evidence/file?path=${encodeURIComponent(path)}`
+}
+
+async function openProfile(block: AuthBlock) {
+  if (actionState.value[block.id]) return
+  actionState.value[block.id] = 'opening'
+  try {
+    await openAuthProfile(block.id)
+    message.success('已打开准确的 AdsPower profile，请在保留的页面中完成登录')
+  } catch (error) {
+    message.error(error instanceof ApiError ? `打开失败：${error.detail}` : '打开 AdsPower 失败')
+  } finally {
+    actionState.value[block.id] = undefined
+  }
+}
+
+async function verifyResume(block: AuthBlock) {
+  if (actionState.value[block.id]) return
+  actionState.value[block.id] = 'verifying'
+  try {
+    const result = await verifyAndResumeAuth(block.id)
+    if (result.status === 'resolved' || result.status === 'already_resolved') {
+      message.success(
+        block.submit_fenced
+          ? '登录已恢复，已开始结果确认；不会重复提交'
+          : '登录已恢复，已安排从当前站点安全继续',
+      )
+      await loadPage(false)
+    } else if (result.status === 'still_blocked') {
+      message.warning(`仍需登录或人工验证：${BLOCK_LABEL[result.block_type ?? ''] ?? result.reason ?? '认证未通过'}`)
+    } else {
+      message.warning(`验证结果：${result.status}`)
+    }
+  } catch (error) {
+    message.error(error instanceof ApiError ? `验证失败：${error.detail}` : '验证失败，请稍后重试')
+  } finally {
+    actionState.value[block.id] = undefined
+  }
+}
 
 const groups: { key: PendingCategory; title: string; desc: string; color: string }[] = [
   { key: 'captcha_2fa_login', title: 'CAPTCHA / 2FA / 登录过期', desc: '浏览器保持打开，人工完成后任务继续', color: '#8b5cf6' },
@@ -69,7 +155,7 @@ const grouped = computed(() =>
 )
 
 const realEmpty = computed(
-  () => recoveries.value.length === 0 && manualCampaigns.value.length === 0 && incidents.value.length === 0,
+  () => authBlocks.value.length === 0 && recoveries.value.length === 0 && manualCampaigns.value.length === 0 && incidents.value.length === 0,
 )
 
 /** 真实模式 incident 分组（按 classification 首匹配归组，state_unknown 只进"账号风险"组不重复进改版组） */
@@ -153,6 +239,11 @@ function go(item: PendingItem) {
       </div>
     </div>
 
+    <n-alert v-if="loadError" type="error" :bordered="false" style="margin-bottom: 16px">
+      状态读取失败：{{ loadError }}
+      <n-button size="small" tertiary style="margin-left: 10px" @click="loadPage(true)">重试</n-button>
+    </n-alert>
+
     <n-spin :show="loading">
       <!-- Mock 模式：原有六类演示分组 -->
       <template v-if="USE_MOCK">
@@ -207,6 +298,91 @@ function go(item: PendingItem) {
           style="margin-top: 80px"
         />
         <div class="group-grid">
+          <n-card v-if="authBlocks.length > 0" class="group-card auth-card" size="small">
+            <template #header>
+              <div class="group-head">
+                <span class="group-dot" style="background-color: #8b5cf6" />
+                <span>登录恢复</span>
+                <n-badge :value="authBlocks.length" :max="99" type="error" />
+              </div>
+            </template>
+            <template #header-extra>
+              <span class="group-desc">同一账号已安全暂停，其他账号仍可运行；页面每 15 秒刷新</span>
+            </template>
+
+            <div class="auth-block-list">
+              <div v-for="block in authBlocks" :key="block.id" class="auth-block-item">
+                <div class="auth-block-head">
+                  <div>
+                    <strong>{{ block.brand_name || '账号级认证阻塞' }}</strong>
+                    <span class="title-scope">
+                      {{ block.account_id }} · {{ block.marketplace?.toUpperCase() || '—' }} · profile {{ block.profile_hint }}
+                    </span>
+                  </div>
+                  <div class="auth-tags">
+                    <n-tag size="small" type="error" :bordered="false">
+                      {{ BLOCK_LABEL[block.block_type] ?? block.block_type }}
+                    </n-tag>
+                    <n-tag size="small" :type="block.submit_fenced ? 'warning' : 'info'" :bordered="false">
+                      {{ phaseLabel(block) }}
+                    </n-tag>
+                  </div>
+                </div>
+
+                <n-alert :type="block.submit_fenced ? 'warning' : 'info'" :bordered="false" class="auth-safety">
+                  <strong>已安全暂停。</strong>
+                  <template v-if="block.submit_fenced">
+                    提交点击安全边界已落库，系统不会重复提交；恢复后只核对 Selling Applications/Case。
+                  </template>
+                  <template v-else>
+                    尚未越过提交点击安全边界；恢复后只继续当前站点，不会提前推进下一站。
+                  </template>
+                </n-alert>
+
+                <div class="auth-meta-grid">
+                  <span>发生阶段：{{ phaseLabel(block) }}</span>
+                  <span>检测：<RelativeTime :time="block.detected_at" /></span>
+                  <span v-if="block.last_checked_at">最后检查：<RelativeTime :time="block.last_checked_at" /></span>
+                  <span v-if="block.next_check_at">下次自动检查：<RelativeTime :time="block.next_check_at" /></span>
+                </div>
+                <div v-if="block.detail" class="pending-detail">{{ block.detail }}</div>
+
+                <div class="auth-actions">
+                  <n-button
+                    size="small"
+                    type="primary"
+                    secondary
+                    :disabled="!block.can_open_profile || Boolean(actionState[block.id])"
+                    :loading="actionState[block.id] === 'opening'"
+                    @click="openProfile(block)"
+                  >
+                    打开 AdsPower 登录
+                  </n-button>
+                  <n-button
+                    size="small"
+                    type="warning"
+                    :disabled="!block.can_verify_and_resume || Boolean(actionState[block.id])"
+                    :loading="actionState[block.id] === 'verifying'"
+                    @click="verifyResume(block)"
+                  >
+                    {{ block.submit_fenced ? '验证并开始结果确认' : '验证并继续' }}
+                  </n-button>
+                  <n-button
+                    v-if="block.evidence_path"
+                    size="small"
+                    tertiary
+                    tag="a"
+                    target="_blank"
+                    :href="evidenceUrl(block.evidence_path)"
+                  >
+                    查看登录页面证据
+                  </n-button>
+                  <span v-if="!block.can_verify_and_resume" class="permission-hint">viewer/operator 仅可查看，需 reviewer/admin 操作</span>
+                </div>
+              </div>
+            </div>
+          </n-card>
+
           <n-card class="group-card hoverable" size="small">
             <template #header>
               <div class="group-head">
@@ -343,6 +519,58 @@ function go(item: PendingItem) {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
   gap: 16px;
+}
+
+.auth-card {
+  grid-column: 1 / -1;
+  border-color: rgba(139, 92, 246, 0.35);
+}
+
+.auth-block-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.auth-block-item {
+  padding: 14px;
+  border: 1px solid rgba(139, 92, 246, 0.22);
+  border-radius: 8px;
+}
+
+.auth-block-head,
+.auth-tags,
+.auth-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.auth-block-head {
+  justify-content: space-between;
+}
+
+.auth-safety {
+  margin-top: 12px;
+}
+
+.auth-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px 18px;
+  margin-top: 12px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.auth-actions {
+  margin-top: 12px;
+}
+
+.permission-hint {
+  font-size: 12px;
+  opacity: 0.55;
 }
 
 .group-head {

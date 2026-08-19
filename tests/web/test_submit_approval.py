@@ -124,6 +124,25 @@ def test_reviewer_submit_creates_queued_job(app, submit_settings):
     assert stored["run_status"] == "queued"
 
 
+def test_reviewer_submit_persists_safe_job_options(app, submit_settings):
+    reviewer = _client_for(app, submit_settings, "reviewer-options", "reviewer")
+    response = _submit(
+        reviewer,
+        options={
+            "case_followup_delay_hours": 4.0,
+            "case_followup_enabled": False,
+        },
+    )
+    assert response.status_code == 200, response.text
+    job = response.json()["job"]
+    assert job["options"] == {
+        "case_followup_delay_hours": 4.0,
+        "case_followup_enabled": False,
+    }
+    stored = get_automation_job(str(submit_settings.db_path), job["id"])
+    assert stored["options"] == job["options"]
+
+
 # 5. Preflight blocker (no adspower_profile_id) -> 422 preflight_blocked, no job.
 def test_preflight_blocked_no_profile(app, submit_settings):
     _add_account(submit_settings, "no_profile_store", entry_url="https://fixture.example.com/login")

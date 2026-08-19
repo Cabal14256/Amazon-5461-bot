@@ -13,6 +13,7 @@ Replaces the hard-coded _run_core() logic with a configurable state loop:
 """
 
 import json
+import os
 import random
 import shutil
 import time
@@ -121,6 +122,7 @@ class StateLoopExecutor:
 
         self.history: list[dict] = []
         self._retry_counts: dict[str, int] = {}
+        self._auth_state = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -169,6 +171,12 @@ class StateLoopExecutor:
                     "timestamp": datetime.now().isoformat(),
                 }
             )
+
+            if state == "auth_blocked":
+                stop_status = self._persist_auth_block()
+                self.history[-1]["action"] = "auth_block"
+                self.history[-1]["action_result"] = False
+                return self._build_result("stopped", error=stop_status)
 
             # d) Detect stuck
             # Skip stuck check for retry states — they manage their own exhaust logic
@@ -266,6 +274,13 @@ class StateLoopExecutor:
         Match page state using check_page_state() first (battle-tested, handles
         Amazon SPA where URL doesn't change after Next), then fall back to StateMachine.
         """
+        from ..auth_guard import detect_auth_state
+
+        auth_state = detect_auth_state(self.page)
+        if auth_state.blocked:
+            self._auth_state = auth_state
+            return "auth_blocked"
+
         # Primary: check_page_state() - accurate for all Amazon SPA transitions
         try:
             from ..flow_submit_5461 import check_page_state
@@ -295,6 +310,67 @@ class StateLoopExecutor:
         if state:
             return state
         return "unknown"
+
+    def _persist_auth_block(self) -> str:
+        from ..auth_recovery import (
+            capture_auth_evidence,
+            create_auth_block,
+            ensure_submission_checkpoint,
+        )
+
+        brand_name = str(self.brand_data.get("brand_name") or "")
+        account_id = str(self.brand_data.get("account_id") or "")
+        marketplace = str(self.brand_data.get("marketplace") or "")
+        db_path = str(
+            self.brand_data.get("checkpoint_db_path")
+            or os.getenv("AMAZON5461_DB_PATH")
+            or self.project_root / "runtime" / "state" / "ledger.db"
+        )
+        owner_type = str(self.brand_data.get("submission_owner_type") or "direct_run")
+        owner_id = str(
+            self.brand_data.get("submission_owner_id")
+            or os.getenv("AMAZON5461_RUN_ID")
+            or f"state-loop:{account_id}:{brand_name}"
+        )
+        checkpoint = ensure_submission_checkpoint(
+            db_path,
+            owner_type=owner_type,
+            owner_id=owner_id,
+            account_id=account_id,
+            marketplace=marketplace,
+            brand_name=brand_name,
+            phase="state_loop_auth",
+        )
+        fenced = bool(checkpoint.get("submit_click_fenced_at"))
+        auth_settings = {
+            "paths": {
+                "db_path": db_path,
+                "evidence_root": str(self.evidence_root),
+            },
+            "auth_recovery": {"poll_interval_seconds": 300},
+        }
+        evidence_path = capture_auth_evidence(
+            self.page,
+            auth_settings,
+            account_id=account_id,
+            phase="state_loop_auth",
+        )
+        auth_block = create_auth_block(
+            auth_settings,
+            account_id=account_id,
+            marketplace=marketplace,
+            brand_name=brand_name,
+            block_type=str(getattr(self._auth_state, "state", "unknown_auth_state")),
+            phase="state_loop_auth",
+            source_type=owner_type,
+            source_id=owner_id,
+            submit_fenced=fenced,
+            evidence_path=evidence_path,
+            detail=str(getattr(self._auth_state, "reason", "Authentication required")),
+            checkpoint_id=int(checkpoint["id"]),
+        )
+        self.history[-1]["auth_block_id"] = int(auth_block["id"])
+        return "waiting_reconciliation" if fenced else "waiting_login"
 
     def _execute(self, state: str, evidence: dict) -> dict:
         """
@@ -442,8 +518,8 @@ class StateLoopExecutor:
                 print(f"[WARN] legacy action '{action_name}' failed: {err}")
                 return {
                     "ok": False,
-                    "done": False,
-                    "stopped": False,
+                    "done": bool(result.get("stop")),
+                    "stopped": bool(result.get("stop")),
                     "case_id": None,
                     "error": err,
                     "action": action_name,

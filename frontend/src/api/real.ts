@@ -9,6 +9,8 @@ import { dashboardStatusLabel } from '@/utils/statusLabels'
 import type {
   Account,
   ApplicationRecord,
+  AuthBlock,
+  AuthBlockAction,
   AutomationJob,
   AutomationJobItem,
   BackendApplication,
@@ -19,11 +21,13 @@ import type {
   CaseFollowUp,
   CaseIdRecovery,
   EligibleDeclinedCase,
+  EffectiveSettings,
   CatalogAccount,
   GeneratePatchResponse,
   Incident,
   IncidentBundleFile,
   JobDetail,
+  JobOptions,
   JobLogEvent,
   JobRunStatus,
   JobSummary,
@@ -31,10 +35,12 @@ import type {
   LogLine,
   OverviewData,
   ReapplicationCampaign,
+  ReapplicationAutomationStatus,
   ReapplicationAuthorizationResult,
   RepairJob,
   RepairJobDetail,
   Site,
+  SettingsPatchResult,
   WebUser,
 } from '@/types'
 
@@ -56,6 +62,20 @@ export async function login(username: string, password: string): Promise<WebUser
 
 export async function logout(): Promise<void> {
   await apiFetch('/auth/logout', { method: 'POST', skipAuthRedirect: true })
+}
+
+export async function fetchEffectiveSettings(): Promise<EffectiveSettings> {
+  return apiFetch<EffectiveSettings>('/settings/effective')
+}
+
+export async function patchEffectiveSettings(
+  revision: string,
+  changes: Record<string, number>,
+): Promise<SettingsPatchResult> {
+  return apiFetch<SettingsPatchResult>('/settings', {
+    method: 'PATCH',
+    body: { revision, changes },
+  })
 }
 
 /* ---------- 总览 ---------- */
@@ -133,12 +153,14 @@ export async function fetchAccounts(): Promise<Account[]> {
     label: a.account_id,
     alias: a.note ?? '',
     marketplaceIds: a.marketplace ? [a.marketplace] : [],
+    status: a.status,
   }))
 }
 
 export interface AccountSyncResult {
   profiles_scanned: number
   enrolled: { account_id: string; marketplace: string; status: string }[]
+  refreshed: { account_id: string; marketplace: string; status: string }[]
   failed: { account_id: string; error: string }[]
   ambiguous: { account_num?: string; reason: string }[]
   no_number_count: number
@@ -168,9 +190,13 @@ export async function fetchBrands(): Promise<Brand[]> {
 /** read model source 值 -> 中文说明（状态来源标签） */
 export const SOURCE_LABEL: Record<string, string> = {
   case_reply: 'Case 最新回复',
+  case_followup_error: 'Case 跟进技术异常',
+  case_id_recovery: 'Case ID 自动恢复',
+  dashboard_reconciliation: 'Selling Applications 对账',
   dashboard_today: '控制面板当天检查',
   submission_case_id: '提交记录（含 Case ID）',
   batch_state: '本地批次状态',
+  automation_checkpoint: '自动处理检查点',
   none: '暂无数据',
 }
 
@@ -191,8 +217,10 @@ export async function fetchApplications(): Promise<ApplicationRecord[]> {
       caseId: a.case_id,
       statusSource: `${sourceLabel}${auth.detail ? `（${auth.detail}）` : ''}`,
       statusSourceRaw: auth.source,
+      statusSourceDetail: auth.detail ?? null,
       updatedAt: auth.checked_at ?? a.submitted_at ?? '',
       evidence: [],
+      automation: a.automation,
     }
   })
 }
@@ -263,7 +291,8 @@ function itemBusinessStatus(raw: string, caseId: string | null): BusinessStatus 
 function mapJobItem(it: AutomationJobItem): JobSummary['results'][number] {
   const rawRun = String(it.run_status ?? '')
   const caseId = it.case_id ?? null
-  const rawBusiness = String(it.business_status ?? '')
+  const authoritative = it.authoritative
+  const rawBusiness = String(authoritative?.status ?? it.business_status ?? '')
   let durationSec: number | null = null
   if (it.started_at && it.finished_at) {
     const started = parseServerTime(it.started_at)
@@ -281,6 +310,9 @@ function mapJobItem(it: AutomationJobItem): JobSummary['results'][number] {
     dashboardStatus: it.dashboard_status ? dashboardStatusLabel(it.dashboard_status) : null,
     durationSec,
     note: it.note ?? null,
+    businessSource: authoritative ? (SOURCE_LABEL[authoritative.source] ?? authoritative.source) : null,
+    businessCheckedAt: authoritative?.checked_at ?? null,
+    businessDetail: authoritative?.detail ?? null,
   }
 }
 
@@ -377,12 +409,13 @@ export interface JobCreatePayload {
   account: string
   brands: string[]
   site?: string | null
+  options?: JobOptions
 }
 
 export async function createDiagnoseJob(payload: JobCreatePayload): Promise<AutomationJob> {
   const r = await apiFetch<{ job: AutomationJob }>('/jobs/diagnose', {
     method: 'POST',
-    body: { account: payload.account, brands: payload.brands, site: payload.site ?? null },
+    body: { account: payload.account, brands: payload.brands, site: payload.site ?? null, options: payload.options },
   })
   return r.job
 }
@@ -390,7 +423,7 @@ export async function createDiagnoseJob(payload: JobCreatePayload): Promise<Auto
 export async function createDryRunJob(payload: JobCreatePayload): Promise<AutomationJob> {
   const r = await apiFetch<{ job: AutomationJob }>('/jobs/dry-run', {
     method: 'POST',
-    body: { account: payload.account, brands: payload.brands, site: payload.site ?? null },
+    body: { account: payload.account, brands: payload.brands, site: payload.site ?? null, options: payload.options },
   })
   return r.job
 }
@@ -419,7 +452,7 @@ export interface SubmitJobResponse {
 export async function createSubmitJob(payload: JobCreatePayload): Promise<SubmitJobResponse> {
   return apiFetch<SubmitJobResponse>('/jobs/submit', {
     method: 'POST',
-    body: { account: payload.account, brands: payload.brands, site: payload.site ?? null },
+    body: { account: payload.account, brands: payload.brands, site: payload.site ?? null, options: payload.options },
   })
 }
 
@@ -525,6 +558,21 @@ export async function fetchCaseFollowUps(status?: string): Promise<CaseFollowUp[
   return r.case_followups
 }
 
+export async function fetchAuthBlocks(status: string | null = 'open'): Promise<AuthBlock[]> {
+  const response = await apiFetch<{ auth_blocks: AuthBlock[]; total: number }>('/auth-blocks', {
+    query: { status },
+  })
+  return response.auth_blocks
+}
+
+export async function openAuthBlockProfile(id: number): Promise<AuthBlockAction> {
+  return apiFetch<AuthBlockAction>(`/auth-blocks/${id}/open-profile`, { method: 'POST' })
+}
+
+export async function verifyAndResumeAuthBlock(id: number): Promise<AuthBlockAction> {
+  return apiFetch<AuthBlockAction>(`/auth-blocks/${id}/verify-and-resume`, { method: 'POST' })
+}
+
 export async function fetchCaseIdRecoveries(status?: string): Promise<CaseIdRecovery[]> {
   const r = await apiFetch<{ case_id_recoveries: CaseIdRecovery[] }>('/case-id-recoveries', {
     query: { status: status ?? null },
@@ -537,6 +585,10 @@ export async function fetchReapplications(status?: string): Promise<Reapplicatio
     query: { status: status ?? null },
   })
   return r.reapplications
+}
+
+export async function fetchReapplicationAutomationStatus(): Promise<ReapplicationAutomationStatus> {
+  return apiFetch<ReapplicationAutomationStatus>('/reapplications/automation-status')
 }
 
 export async function fetchReapplication(id: number): Promise<ReapplicationCampaign> {

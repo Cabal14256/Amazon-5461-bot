@@ -2,9 +2,9 @@ import type { Account, Brand, Site } from '@/types'
 
 /** 账号全部使用脱敏标识，绝不出现真实邮箱/密码 */
 export const mockAccounts: Account[] = [
-  { id: 'acc-001', label: 'demo-na', alias: '演示北美账号', marketplaceIds: ['ATVPDKIKX0DER'] },
-  { id: 'acc-002', label: 'demo-eu', alias: '演示欧洲账号', marketplaceIds: ['A1F83G8C2ARO7P', 'A1PA6795UKMFR9'] },
-  { id: 'acc-003', label: 'demo-mx', alias: '演示墨西哥账号', marketplaceIds: ['A1AM78C64UM0Y8'] },
+  { id: 'acc-001', label: 'demo-na', alias: '演示北美账号', marketplaceIds: ['ATVPDKIKX0DER'], status: 'active' },
+  { id: 'acc-002', label: 'demo-eu', alias: '演示欧洲账号', marketplaceIds: ['A1F83G8C2ARO7P', 'A1PA6795UKMFR9'], status: 'active' },
+  { id: 'acc-003', label: 'demo-mx', alias: '演示墨西哥账号', marketplaceIds: ['A1AM78C64UM0Y8'], status: 'active' },
 ]
 
 export const mockSites: Site[] = [

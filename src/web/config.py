@@ -21,6 +21,10 @@ DEFAULT_SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.yaml"
 
 @dataclass
 class WebSettings:
+    # Source file used by the public settings registry.  Tests may point this
+    # at a temporary YAML file so the real local configuration is untouched.
+    settings_path: Path = DEFAULT_SETTINGS_PATH
+    settings_backup_root: Path = PROJECT_ROOT / "runtime" / "private" / "settings-backups"
     host: str = "127.0.0.1"
     port: int = 8080
     db_path: Path = PROJECT_ROOT / "runtime" / "state" / "ledger.db"
@@ -44,6 +48,10 @@ class WebSettings:
     sse_poll_seconds: float = 2.0
     # Job dispatcher tick interval (2s per the stage-3 plan; tests lower it).
     job_tick_seconds: float = 2.0
+    # Passive Seller Central authentication verification.  The verifier only
+    # inspects an already-authenticated AdsPower profile; it never enters
+    # credentials or handles CAPTCHA/2FA.
+    auth_recovery_poll_seconds: float = 300.0
     # Informational only — actual restriction is enforced by the OS firewall.
     allowed_cidrs: list[str] = field(default_factory=list)
     # Stage-4 real-submit gate. Real submission is enabled by default, but it
@@ -127,6 +135,7 @@ def load_settings(settings_path: Path | None = None) -> WebSettings:
     import os
 
     settings = WebSettings()
+    settings.settings_path = settings_path
     settings.host = str(web.get("host") or settings.host)
     settings.port = int(web.get("port") or settings.port)
     settings.db_path = _resolve(PROJECT_ROOT, paths.get("db_path"), settings.db_path)
@@ -152,6 +161,12 @@ def load_settings(settings_path: Path | None = None) -> WebSettings:
     settings.allowed_cidrs = [str(c) for c in cidrs]
     settings.submit_enabled = bool(web.get("submit_enabled", settings.submit_enabled))
     settings.submit_max_brands = int(web.get("submit_max_brands") or settings.submit_max_brands)
+
+    auth_recovery = raw.get("auth_recovery") or {}
+    settings.auth_recovery_poll_seconds = float(
+        auth_recovery.get("poll_interval_seconds")
+        or settings.auth_recovery_poll_seconds
+    )
 
     incidents = raw.get("incidents") or {}
     settings.incidents_enabled = bool(incidents.get("enabled", settings.incidents_enabled))

@@ -15,6 +15,7 @@ from src.reapplication import (
     create_campaign_from_declined_case,
     declined_case_candidate,
     get_campaign_by_source_case,
+    get_reapplication_config,
     launch_reapplication_worker,
     list_eligible_declined_cases,
 )
@@ -46,6 +47,7 @@ def _campaign_to_out(row: dict[str, Any], attempts: list[dict[str, Any]]) -> Rea
         route=[str(s) for s in route] if isinstance(route, list) else [],
         current_route_index=int(row.get("current_route_index") or 0),
         status=row["status"],
+        authorization_source=str(row.get("authorization_source") or "manual"),
         source_case_followup_id=row.get("source_case_followup_id"),
         source_marketplace=row.get("source_marketplace"),
         stop_reason=row.get("stop_reason"),
@@ -59,7 +61,8 @@ def _campaign_to_out(row: dict[str, Any], attempts: list[dict[str, Any]]) -> Rea
 def _load_attempts(conn, campaign_id: int) -> list[dict[str, Any]]:
     rows = conn.execute(
         """SELECT id, campaign_id, route_index, site, status, scheduled_at, started_at,
-                  submitted_at, completed_at, case_id, final_result, decision_reason, error
+                  submitted_at, completed_at, case_id, final_result, decision_reason,
+                  error, auth_block_id
            FROM reapplication_attempts WHERE campaign_id=? ORDER BY route_index""",
         (campaign_id,),
     ).fetchall()
@@ -109,6 +112,26 @@ def eligible_declines(request: Request):
     settings = get_settings(request)
     items = list_eligible_declined_cases(_runtime_settings(settings))
     return {"eligible_declines": items, "total": len(items)}
+
+
+@router.get("/automation-status")
+def automation_status(request: Request):
+    settings = get_settings(request)
+    config = get_reapplication_config(_runtime_settings(settings))
+    return {
+        "enabled": bool(config["enabled"]),
+        "auto_authorize_declined_cases": bool(
+            config["auto_authorize_declined_cases"]
+        ),
+        "auto_backfill_declined_cases": bool(
+            config["auto_backfill_declined_cases"]
+        ),
+        "auto_backfill_min_followup_id": int(
+            config["auto_backfill_min_followup_id"]
+        ),
+        "decline_delay_hours": float(config["decline_delay_hours"]),
+        "routes": {key: list(value) for key, value in config["routes"].items()},
+    }
 
 
 @router.post("")
@@ -162,6 +185,7 @@ def authorize_reapplication(
             followup_id,
             confirmed_remaining_route=body.confirmed_remaining_route,
             authorize_submit=body.authorize_submit,
+            authorization_source="manual_case",
         )
     except ReapplicationStartError as exc:
         status = 404 if exc.code == "case_followup_not_found" else 403 if exc.code == "reapplication_disabled" else 409

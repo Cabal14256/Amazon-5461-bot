@@ -47,6 +47,15 @@ def test_posix_followup_worker_preserves_timezone_override():
     assert env["TZ"] == "Asia/Taipei"
 
 
+def test_windows_stale_pid_system_error_does_not_block_worker_relaunch(monkeypatch):
+    def stale_pid(_pid, _signal):
+        raise SystemError("<built-in function kill> returned a result with an exception set")
+
+    monkeypatch.setattr(case_followup.os, "kill", stale_pid)
+
+    assert case_followup._pid_running(999999) is False
+
+
 def test_classifies_confirmed_decline_reply():
     result = classify_case_reply(
         "Answered",
@@ -550,6 +559,34 @@ def test_followup_session_close_stops_adspower_profile():
     session.close()
 
     assert calls[-1] == ("manager_close", True)
+    assert session.manager is None
+    assert session.page is None
+    assert session.ready is False
+
+
+def test_followup_auth_detach_preserves_profile_and_page():
+    calls = []
+
+    class FakePage:
+        def close(self):
+            calls.append(("page_close", None))
+
+    class FakeManager:
+        def disconnect(self, quiet=True):
+            calls.append(("disconnect", quiet))
+
+        def close(self, *, stop_profile=False):
+            calls.append(("manager_close", stop_profile))
+
+    session = case_followup.CaseFollowupBrowserSession({}, "example-account", "US")
+    session.page = FakePage()
+    session.manager = FakeManager()
+    session.ready = True
+
+    session.detach_preserving_auth_page()
+    session.close()
+
+    assert calls == [("disconnect", True)]
     assert session.manager is None
     assert session.page is None
     assert session.ready is False

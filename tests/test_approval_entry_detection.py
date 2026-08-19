@@ -1,8 +1,26 @@
 from src.flow_submit_5461 import (
+    _async_screenshot,
     capture_failure_page_evidence,
     check_page_state,
     has_application_required_entry_text,
 )
+
+
+def test_optional_screenshot_runs_on_calling_thread():
+    import threading
+
+    calls = []
+
+    class Page:
+        def screenshot(self, **kwargs):
+            calls.append((threading.get_ident(), kwargs))
+
+    caller = threading.get_ident()
+    _async_screenshot(Page(), "evidence.png", full_page=True, timeout=321)
+
+    assert calls == [
+        (caller, {"path": "evidence.png", "full_page": True, "timeout": 321})
+    ]
 
 
 class _MissingLocator:

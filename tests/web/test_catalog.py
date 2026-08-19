@@ -96,4 +96,81 @@ def test_sync_accounts_idempotent(admin_client, web_settings, monkeypatch):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["enrolled"] == []
+    assert body["refreshed"] == []
     assert body["total"] == 2
+
+
+def test_sync_accounts_refreshes_unique_pending_profile(
+    admin_client, web_settings, monkeypatch
+):
+    import json
+
+    payload = json.loads(web_settings.accounts_path.read_text(encoding="utf-8"))
+    payload["accounts"].append({
+        "account_id": "us_store_777",
+        "marketplace": "US",
+        "status": "pending_setup",
+        "adspower_profile_id": "",
+    })
+    web_settings.accounts_path.write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    fake_profiles = [{
+        "user_id": "fixture-pid-pending-777",
+        "name": "Seller account 777",
+        "remark": "",
+        "status": "active",
+    }]
+    _patch_adspower(monkeypatch, web_settings, fake_profiles)
+
+    response = admin_client.post("/api/catalog/accounts/sync")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["enrolled"] == []
+    assert body["refreshed"] == [{
+        "account_id": "us_store_777",
+        "marketplace": "US",
+        "status": "active",
+    }]
+
+    updated = json.loads(web_settings.accounts_path.read_text(encoding="utf-8"))
+    account = next(
+        row for row in updated["accounts"] if row["account_id"] == "us_store_777"
+    )
+    assert account["status"] == "active"
+    assert account["adspower_profile_id"] == "fixture-pid-pending-777"
+
+
+def test_sync_accounts_does_not_guess_between_pending_profile_matches(
+    admin_client, web_settings, monkeypatch
+):
+    import json
+
+    payload = json.loads(web_settings.accounts_path.read_text(encoding="utf-8"))
+    payload["accounts"].append({
+        "account_id": "us_store_777",
+        "marketplace": "US",
+        "status": "pending_setup",
+        "adspower_profile_id": "",
+    })
+    web_settings.accounts_path.write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    fake_profiles = [
+        {"user_id": "fixture-pid-a", "name": "777 A", "status": "active"},
+        {"user_id": "fixture-pid-b", "name": "777 B", "status": "active"},
+    ]
+    _patch_adspower(monkeypatch, web_settings, fake_profiles)
+
+    response = admin_client.post("/api/catalog/accounts/sync")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["refreshed"] == []
+    assert len(body["ambiguous"]) == 1
+
+    unchanged = json.loads(web_settings.accounts_path.read_text(encoding="utf-8"))
+    account = next(
+        row for row in unchanged["accounts"] if row["account_id"] == "us_store_777"
+    )
+    assert account["status"] == "pending_setup"
+    assert account["adspower_profile_id"] == ""

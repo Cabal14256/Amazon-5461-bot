@@ -6,6 +6,7 @@
 
 - [`CURRENT_STATE.md`](CURRENT_STATE.md)：当前实现、迁移语境和已验证边界。
 - [`reference/status-sync-rules.md`](reference/status-sync-rules.md)：业务状态优先级与同步规则。
+- [`reference/configuration-reference.md`](reference/configuration-reference.md)：可调整参数、前端白名单、生效方式与安全边界。
 - [`security/secret-handling.md`](security/secret-handling.md)：私密配置与证据处理规则。
 
 ## 运维手册
@@ -14,6 +15,7 @@
 - [`runbooks/runbook-dashboard-check.md`](runbooks/runbook-dashboard-check.md)
 - [`runbooks/runbook-case-followup.md`](runbooks/runbook-case-followup.md)
 - [`runbooks/runbook-reapplication-campaigns.md`](runbooks/runbook-reapplication-campaigns.md)
+- [`runbooks/runbook-auth-recovery.md`](runbooks/runbook-auth-recovery.md)
 - [`runbooks/runbook-web-console.md`](runbooks/runbook-web-console.md)
 
 ## 设计与历史

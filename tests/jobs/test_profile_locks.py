@@ -122,3 +122,22 @@ def test_case_followup_lock_uses_owner_pid_for_reclaim(job_env):
         now=later,
         pid_alive=lambda _pid: False,
     )
+
+
+def test_fresh_crashed_worker_lock_is_reclaimed_early(job_env):
+    db = str(job_env.db_path)
+    key = profile_key_for_profile_id("profile-reapplication")
+    owner = "reapplication:43210:13:us_store_682"
+    assert acquire_profile_lock(
+        db, key, "reapplication_worker", owner, ttl_seconds=7200, now=T0
+    )
+    assert acquire_profile_lock(
+        db,
+        key,
+        "case_followup_worker",
+        "case-followup:55555:0:us_store_682:DE",
+        ttl_seconds=7200,
+        now=T0 + timedelta(seconds=10),
+        pid_alive=lambda pid: pid != 43210,
+    )
+    assert get_profile_lock(db, key)["owner_id"].startswith("case-followup:55555:")

@@ -18,9 +18,11 @@ Amazon 服务端错误页面检测与自动恢复
 """
 
 import time
-from typing import Optional, Callable
+from collections.abc import Callable
+
 from playwright.sync_api import Page
 
+from .auth_guard import ensure_not_auth_blocked
 
 # Amazon 服务端错误页面的特征文本
 SERVER_ERROR_PATTERNS = [
@@ -136,7 +138,7 @@ def recover_from_server_error(
     target_url: str,
     max_retries: int = 3,
     wait_seconds: int = 90,
-    on_retry: Optional[Callable[[int, dict], None]] = None,
+    on_retry: Callable[[int, dict], None] | None = None,
 ) -> dict:
     """
     从 Amazon 服务端错误页面恢复
@@ -163,6 +165,7 @@ def recover_from_server_error(
         }
     """
     for retry in range(max_retries):
+        ensure_not_auth_blocked(page, phase="server_error_check")
         error_info = is_amazon_server_error_page(page)
         
         if not error_info['is_error']:
@@ -194,16 +197,19 @@ def recover_from_server_error(
                     page.wait_for_load_state("networkidle", timeout=5000)
                 except Exception:
                     pass
+
+                ensure_not_auth_blocked(page, phase="server_error_after_reload")
                 
                 # 刷新后如果还是错误页面，尝试重新导航
                 error_info_after_reload = is_amazon_server_error_page(page)
                 if error_info_after_reload['is_error']:
-                    print(f"[ServerError] 刷新后仍是错误页面，尝试重新导航...")
+                    print("[ServerError] 刷新后仍是错误页面，尝试重新导航...")
                     page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
                     try:
                         page.wait_for_load_state("networkidle", timeout=8000)
                     except Exception:
                         pass
+                    ensure_not_auth_blocked(page, phase="server_error_after_navigation")
             except Exception as e:
                 print(f"[ServerError] 刷新/导航失败: {e}")
                 # 继续下一次重试
@@ -221,7 +227,7 @@ def recover_from_server_error(
 def ensure_page_ready(
     page: Page,
     target_url: str,
-    check_callback: Optional[Callable[[Page], bool]] = None,
+    check_callback: Callable[[Page], bool] | None = None,
     max_retries: int = 3,
     wait_seconds: int = 90,
 ) -> dict:
@@ -240,6 +246,9 @@ def ensure_page_ready(
     Returns:
         同 recover_from_server_error
     """
+    # Authentication stops outrank low-text/server-error heuristics.  Never
+    # refresh or re-navigate a login/CAPTCHA/2FA/risk page.
+    ensure_not_auth_blocked(page, phase="page_ready")
     # 首先检查服务端错误
     result = recover_from_server_error(
         page=page,

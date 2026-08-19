@@ -20,6 +20,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_bufferin
 
 import argparse
 import json
+import os
 import random
 import re
 import time
@@ -802,6 +803,18 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                 "brand_keywords": None,
                 "item_type_keyword": item_type_keyword,
                 "item_name": "",
+                "submission_owner_type": (
+                    "reapplication_attempt" if item.get("reapplication_attempt_id") is not None else "automation_job"
+                ),
+                "submission_owner_id": str(
+                    item.get("reapplication_attempt_id")
+                    if item.get("reapplication_attempt_id") is not None
+                    else os.getenv("AMAZON5461_JOB_ID", "")
+                ),
+                "checkpoint_db_path": str(
+                    (settings.get("paths") or {}).get("db_path")
+                    or project_root / "runtime" / "state" / "ledger.db"
+                ),
             }
             # Try to load brand keywords from manifest
             manifest_path = project_root / "brand_packs" / brand_name / "manifest.json"
@@ -826,9 +839,14 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                 "failed": "failed",
                 "stopped": "failed",
             }
+            loop_error = str(loop_result.get("error") or "")
+            if loop_error in {"waiting_login", "waiting_reconciliation"}:
+                mapped_status = loop_error
+            else:
+                mapped_status = status_map.get(loop_result.get("result", "failed"), "failed")
             result = {
-                "status": status_map.get(loop_result.get("result", "failed"), "failed"),
-                "note": loop_result.get("error", ""),
+                "status": mapped_status,
+                "note": loop_error,
                 "case_id": loop_result.get("case_id"),
                 "steps": loop_result.get("steps", []),
                 "account_created": account_meta["created"],
@@ -867,6 +885,20 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                 skip_market_switch=skip_market_switch,
                 skip_add_product_goto=skip_add_product_goto,
                 no_submit=dry_run,
+                submission_owner_type=(
+                    "reapplication_attempt"
+                    if item.get("reapplication_attempt_id") is not None
+                    else ("automation_job" if os.getenv("AMAZON5461_JOB_ID") else None)
+                ),
+                submission_owner_id=(
+                    item.get("reapplication_attempt_id")
+                    if item.get("reapplication_attempt_id") is not None
+                    else os.getenv("AMAZON5461_JOB_ID")
+                ),
+                checkpoint_db_path=str(
+                    (settings.get("paths") or {}).get("db_path")
+                    or project_root / "runtime" / "state" / "ledger.db"
+                ),
             )
 
             result = {
@@ -874,6 +906,10 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                 "note": result.get("note", ""),
                 "case_id": result.get("case_id"),
                 "submission_started_at": result.get("submission_started_at"),
+                "submission_checkpoint_id": result.get("submission_checkpoint_id"),
+                "submit_click_fenced": bool(result.get("submit_click_fenced")),
+                "auth_block_id": result.get("auth_block_id"),
+                "auth_block": result.get("auth_block"),
                 "dashboard_check": result.get("dashboard_check"),
                 "evidence_files": result.get("evidence_files", []),
                 "steps": result.get("steps", []),
@@ -933,6 +969,18 @@ def run_single_item(item: dict, config: dict, dry_run: bool = False, page=None, 
                     "brand_keywords": None,
                     "item_type_keyword": item_type_keyword,
                     "item_name": "",
+                    "submission_owner_type": (
+                        "reapplication_attempt" if item.get("reapplication_attempt_id") is not None else "automation_job"
+                    ),
+                    "submission_owner_id": str(
+                        item.get("reapplication_attempt_id")
+                        if item.get("reapplication_attempt_id") is not None
+                        else os.getenv("AMAZON5461_JOB_ID", "")
+                    ),
+                    "checkpoint_db_path": str(
+                        (settings.get("paths") or {}).get("db_path")
+                        or project_root / "runtime" / "state" / "ledger.db"
+                    ),
                 }
                 try:
                     mf_path = project_root / "brand_packs" / brand_name / "manifest.json"
@@ -1002,7 +1050,10 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
     batch["started_at"] = datetime.now().isoformat()
 
     # 按 (account_id, site) 分组排序，同组品牌复用浏览器会话
-    items = [i for i in batch["items"] if i["status"] not in ("completed", "skipped")]
+    # ``failed`` is terminal for the recorded attempt. Managed resumes must
+    # never silently retry an earlier failed brand; an explicit retry resets
+    # it to ``pending`` below before reinserting it.
+    items = [i for i in batch["items"] if i["status"] not in ("completed", "failed", "skipped")]
     items.sort(key=lambda x: (x["account_id"], x.get("site") or ""))
 
     from playwright.sync_api import sync_playwright
@@ -1272,7 +1323,16 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
             group_market_switched = True
             print(f"[会话] 已确认本组市场 {group_key} 切换完成；后续品牌跳过市场切换")
 
-        if result["status"] in ("success", "dry_run", "under_review"):
+        if result["status"] in ("waiting_login", "waiting_reconciliation"):
+            item["status"] = "waiting_human"
+            item["error"] = result.get("note", "")
+            batch["status"] = "waiting_human"
+            print(
+                f"[认证暂停] {item['account_id']} / {item['brand_name']}："
+                f"{result['status']}；同账号剩余品牌保持待执行"
+            )
+            break
+        elif result["status"] in ("success", "dry_run", "under_review"):
             item["status"] = "completed"
             state["summary"]["completed"] += 1
             state["summary"]["pending"] -= 1
@@ -1378,9 +1438,10 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
                 print(f"等待 {delay} 秒（品牌间随机冷却 {delay_min}-{delay_max}s，避免429限流）...")
                 time.sleep(delay)
 
-    # 全部处理结束：先把保留页跳到对应主页，再仅断开 Playwright。
-    # AdsPower profile 保持运行，避免 browser.close() 造成 profile 生命周期混乱。
-    if browser:
+    # 全部处理结束：普通收尾可把保留页跳回主页；认证暂停时必须原样保留
+    # 登录/CAPTCHA/2FA 页面，方便人工接管。两种情况都只断开 Playwright，
+    # 不关闭 AdsPower profile。
+    if browser and batch.get("status") != "waiting_human":
         navigate_group_home(context, anchor_page, current_group, batch)
     if p:
         try:
@@ -1388,8 +1449,9 @@ def run_batch(state: dict, batch_no: int, dry_run: bool = False, enable_monitor:
         except Exception:
             pass
 
-    batch["status"] = "completed"
-    batch["completed_at"] = datetime.now().isoformat()
+    if batch.get("status") != "waiting_human":
+        batch["status"] = "completed"
+        batch["completed_at"] = datetime.now().isoformat()
     return state
 
 
@@ -1466,7 +1528,10 @@ def main():
     try:
         state_path = project_root / args.state_file
 
-        if state_path.exists() and not args.config and not args.accounts:
+        managed_resume = bool(
+            os.getenv("AMAZON5461_JOB_ID") or args.reapplication_attempt_id is not None
+        )
+        if state_path.exists() and (managed_resume or (not args.config and not args.accounts)):
             print(f"\n加载现有状态: {state_path}")
             state = load_batch_state(str(state_path))
         else:
